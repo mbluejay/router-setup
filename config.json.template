@@ -1,0 +1,206 @@
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log"
+  },
+  "dns": {
+    "servers": [
+      {
+        "address": "77.88.8.8",
+        "domains": [
+          "geosite:category-ru",
+          "geosite:whitelist",
+          "geosite:steam",
+          "geosite:microsoft",
+          "geosite:apple"
+        ]
+      },
+      {
+        "address": "77.88.8.1",
+        "domains": [
+          "geosite:category-ru",
+          "geosite:whitelist",
+          "geosite:steam",
+          "geosite:microsoft",
+          "geosite:apple"
+        ]
+      },
+      "8.8.8.8"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tproxy-in",
+      "port": 12345,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "network": "tcp,udp",
+        "followRedirect": true
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tproxy": "tproxy",
+          "mark": 255
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
+      }
+    },
+    {
+      "tag": "dns-in",
+      "port": 5300,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "8.8.8.8",
+        "port": 53,
+        "network": "tcp,udp"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "<<VLESS_SERVER>>",
+          "port": <<VLESS_PORT>>,
+          "users": [{
+            "id": "<<VLESS_UUID>>",
+            "flow": "<<VLESS_FLOW>>",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": <<STREAM_SETTINGS>>,
+      "sockopt": { "mark": 255 }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": { "domainStrategy": "UseIPv4" },
+      "streamSettings": {
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "dns-out",
+      "protocol": "dns"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["dns-in"],
+        "outboundTag": "dns-out"
+      },
+      {
+        "type": "field",
+        "outboundTag": "block",
+        "domain": ["geosite:win-spy"]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": ["geoip:private"]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": ["geoip:ru"]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": [
+          "103.10.124.0/22",
+          "103.28.54.0/23",
+          "146.66.152.0/21",
+          "155.133.224.0/19",
+          "162.254.192.0/18",
+          "185.25.182.0/23",
+          "185.86.148.0/22",
+          "192.69.96.0/22",
+          "198.52.192.0/22",
+          "199.59.148.0/22",
+          "205.196.6.0/23",
+          "208.64.200.0/22"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": [
+          "geosite:whitelist",
+          "geosite:category-ru",
+          "geosite:steam",
+          "geosite:microsoft",
+          "geosite:apple"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "port": "6881-6889"
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "network": "udp",
+        "port": "500,1701,4500"
+      },
+      {
+        "type": "field",
+        "outboundTag": "proxy",
+        "network": "tcp,udp"
+      }
+    ]
+  }
+}
+
+// ============================================================
+// ПРИМЕЧАНИЕ: Вместо <<STREAM_SETTINGS>> подставить один из блоков ниже:
+//
+// --- VLESS + REALITY + TCP (наиболее распространённый) ---
+// "streamSettings": {
+//   "network": "tcp",
+//   "security": "reality",
+//   "realitySettings": {
+//     "serverName": "<<VLESS_SNI>>",
+//     "fingerprint": "<<VLESS_FP>>",
+//     "publicKey": "<<VLESS_PBKEY>>",
+//     "shortId": "<<VLESS_SID>>"
+//   }
+// }
+//
+// --- VLESS + TLS + WebSocket ---
+// "streamSettings": {
+//   "network": "ws",
+//   "security": "tls",
+//   "tlsSettings": {
+//     "serverName": "<<VLESS_SNI>>",
+//     "fingerprint": "<<VLESS_FP>>"
+//   },
+//   "wsSettings": {
+//     "path": "<<VLESS_PATH>>",
+//     "headers": { "Host": "<<VLESS_HOST>>" }
+//   }
+// }
+//
+// --- VLESS + TLS + gRPC ---
+// "streamSettings": {
+//   "network": "grpc",
+//   "security": "tls",
+//   "tlsSettings": { "serverName": "<<VLESS_SNI>>" },
+//   "grpcSettings": { "serviceName": "<<VLESS_PATH>>" }
+// }
+// ============================================================
