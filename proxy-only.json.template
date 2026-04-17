@@ -1,0 +1,36 @@
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "port": 8118,
+    "listen": "127.0.0.1",
+    "protocol": "http",
+    "settings": {}
+  }],
+  "outbounds": [{
+    "tag": "proxy",
+    "protocol": "vless",
+    "settings": {
+      "vnext": [{
+        "address": "<<VLESS_SERVER>>",
+        "port": <<VLESS_PORT>>,
+        "users": [{
+          "id": "<<VLESS_UUID>>",
+          "flow": "<<VLESS_FLOW>>",
+          "encryption": "none"
+        }]
+      }]
+    },
+    "streamSettings": <<STREAM_SETTINGS>>
+  }]
+}
+
+// Временный HTTP proxy для установки пакетов (apk add через xray).
+// Используется на Шаге 3 до настройки TProxy.
+// Слушает на 127.0.0.1:8118, все запросы уходят через VLESS.
+//
+// После подстановки параметров запустить на роутере:
+//   /usr/local/bin/xray run -c /tmp/proxy.json > /tmp/xray-proxy.log 2>&1 &
+// Проверить:
+//   http_proxy=http://127.0.0.1:8118 wget -q -O /dev/null http://example.com && echo OK
+//
+// Блок <<STREAM_SETTINGS>> — см. комментарии в config.json.template
