@@ -7,6 +7,17 @@
   "dns": {
     "servers": [
       {
+        "address": "https://1.1.1.1/dns-query",
+        "domains": [
+          "domain:x.com",
+          "domain:twitter.com",
+          "domain:t.co",
+          "domain:twimg.com",
+          "domain:themoviedb.org",
+          "domain:tmdb.org"
+        ]
+      },
+      {
         "address": "77.88.8.8",
         "domains": [
           "geosite:category-ru",
@@ -24,15 +35,6 @@
           "geosite:steam",
           "geosite:microsoft",
           "geosite:apple"
-        ]
-      },
-      {
-        "address": "https://1.1.1.1/dns-query",
-        "domains": [
-          "domain:x.com",
-          "domain:twitter.com",
-          "domain:t.co",
-          "domain:twimg.com"
         ]
       },
       "8.8.8.8"
