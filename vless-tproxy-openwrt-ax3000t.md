@@ -259,6 +259,17 @@ scp -O -o StrictHostKeyChecking=no xray-geo-update.sh root@<<ROUTER_IP>>:/usr/lo
 ssh root@<<ROUTER_IP>> "chmod +x /usr/local/bin/xray-geo-update.sh && echo GEO_UPDATE_OK"
 ```
 
+#### 5г.2. Скрипт обрезки access.log (защита tmpfs от переполнения)
+
+`/var/log/` — это tmpfs в RAM (~116 MB на AX3000T). При активном использовании `access.log` растёт ~5-8 MB/час и за сутки может забить tmpfs, что приведёт к сбою dnsmasq, xray и всего роутера. `logrotate` не входит в OpenWrt из коробки, а `stat -c%s` отсутствует в busybox — поэтому используется простой скрипт на `wc -c`.
+
+```bash
+scp -O -o StrictHostKeyChecking=no xray-log-truncate.sh root@<<ROUTER_IP>>:/usr/local/bin/xray-log-truncate.sh
+ssh root@<<ROUTER_IP>> "chmod +x /usr/local/bin/xray-log-truncate.sh && echo LOG_TRUNCATE_OK"
+```
+
+Скрипт работает безопасно с xray: после `:> $LOG` следующая запись xray идёт в offset 0 благодаря `O_APPEND`, sparse-файла не образуется.
+
 #### 5д. Hotplug — восстановление ip rules при перезапуске сети
 
 ```bash
@@ -279,11 +290,16 @@ echo HOTPLUG_OK
 EOF
 ```
 
-#### 5е. Cron — еженедельное обновление geo-баз
+#### 5е. Cron — обновление geo-баз и обрезка логов
 
 ```bash
-ssh root@<<ROUTER_IP>> "(crontab -l 2>/dev/null | grep -v xray-geo-update; echo '0 4 * * 0 /usr/local/bin/xray-geo-update.sh') | crontab - && echo CRON_OK"
+ssh root@<<ROUTER_IP>> "(crontab -l 2>/dev/null | grep -vE 'xray-geo-update|xray-log-truncate'; \
+  echo '0 4 * * 0 /usr/local/bin/xray-geo-update.sh'; \
+  echo '0 * * * * /usr/local/bin/xray-log-truncate.sh') | crontab - && echo CRON_OK"
 ```
+
+- `0 4 * * 0` — geo-базы каждое воскресенье в 4:00
+- `0 * * * *` — обрезка access.log каждый час (если >10 MB)
 
 #### 5ж. Запуск сервиса
 
@@ -457,7 +473,7 @@ echo '=== error log ===' && tail -5 /var/log/xray/error.log 2>/dev/null || echo 
 - dnsmasq: `127.0.0.1#5300` и `77.88.8.8`
 - wifi: radio0.disabled=1, radio1.disabled=0, ssid=твой SSID
 - geo: geoip.dat (>20M), geosite.dat (>50K) — оба ненулевые
-- cron: `0 4 * * 0 /usr/local/bin/xray-geo-update.sh`
+- cron: две записи — `0 4 * * 0 /usr/local/bin/xray-geo-update.sh` и `0 * * * * /usr/local/bin/xray-log-truncate.sh`
 - hotplug: файл существует
 - error log: только строка `Xray X.X.X started`, никаких ERROR
 
@@ -560,11 +576,15 @@ Fastly CDN (downloads.openwrt.org) заблокирован российским
 
 **Решение**: hotplug `/etc/hotplug.d/iface/99-xray-tproxy` (Шаг 5д).
 
-### 4. /var/log/ — tmpfs, очищается при перезагрузке
+### 4. /var/log/ — tmpfs, очищается при перезагрузке + может забиться
 
 После reboot директория `/var/log/xray/` исчезает, xray не может писать логи и не стартует.
 
-**Решение**: `mkdir -p /var/log/xray` в `start_service()` init.d.
+**Решение 1**: `mkdir -p /var/log/xray` в `start_service()` init.d.
+
+**Кроме этого**: tmpfs на AX3000T всего ~116 MB. `access.log` растёт 5-8 MB/час, за сутки активного использования забьёт tmpfs — сломает dnsmasq (кэш тоже в `/tmp`), xray и весь роутер.
+
+**Решение 2**: cron-скрипт `xray-log-truncate.sh` каждый час обрезает `access.log` если он >10 MB, оставляя последние 2000 строк для диагностики. `logrotate` не ставится (нет в OpenWrt из коробки, плюс tmpfs не сохраняет rotated-файлы между перезагрузками — смысла мало). Скрипт использует `wc -c` потому что `stat -c%s` отсутствует в busybox. Работает безопасно с xray за счёт `O_APPEND`: после `:> $LOG` следующий write идёт в offset 0.
 
 ### 5. nohup не установлен на OpenWrt
 
