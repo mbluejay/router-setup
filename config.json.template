@@ -26,6 +26,15 @@
           "geosite:apple"
         ]
       },
+      {
+        "address": "https://1.1.1.1/dns-query",
+        "domains": [
+          "domain:x.com",
+          "domain:twitter.com",
+          "domain:t.co",
+          "domain:twimg.com"
+        ]
+      },
       "8.8.8.8"
     ]
   },
