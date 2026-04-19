@@ -307,13 +307,16 @@ EOF
 **Архитектура**:
 ```
 LAN клиент → dnsmasq :53 → xray :5300
-                              ↓ routing:
-               RU домены      → Yandex DNS 77.88.8.8 / 77.88.8.1 → direct
-               Cloudflare-бренды (x.com, twitter.com, t.co, twimg.com)
-                              → DoH 1.1.1.1/dns-query → proxy
-               Остальное      → 8.8.8.8 → proxy (через VPN)
+                              ↓ routing (первый match побеждает):
+               DoH Cloudflare  — x.com, twitter.com, t.co, twimg.com,
+                                 themoviedb.org, tmdb.org → proxy
+               Yandex DNS      — geosite:category-ru, whitelist, steam,
+                                 microsoft, apple → direct
+               8.8.8.8         — всё остальное → proxy (через VPN)
 ```
 
+> **Порядок серверов важен**: DoH-блок должен идти **первым** в `dns.servers`. Некоторые домены (например `themoviedb.org`) попадают в `geosite:whitelist` от roscomvpn-geosite, и если Yandex-блок стоит выше — он выиграет матч, а сам Yandex DNS для этих доменов возвращает `127.0.0.1` (фильтрация на стороне сервиса).
+>
 > **Почему отдельный DoH для Cloudflare-брендов**: Google DNS через VLESS-сервер отдаёт anycast-IP Cloudflare "ближайший к VPN-серверу", а не к клиенту. Для некоторых сайтов (например x.com) возвращается специализированный edge (из диапазона Discord), который не роутит SNI корректно — страница бесконечно грузится. Cloudflare DNS (1.1.1.1 DoH) знает свою инфраструктуру и отдаёт IP, работающий с любым из своих сайтов. Подробности — в подводном камне #11.
 
 ```bash
@@ -322,11 +325,17 @@ uci set dhcp.@dnsmasq[0].noresolv=1
 uci delete dhcp.@dnsmasq[0].server 2>/dev/null
 uci add_list dhcp.@dnsmasq[0].server="127.0.0.1#5300"
 uci add_list dhcp.@dnsmasq[0].server="77.88.8.8"   # fallback если xray ещё не стартовал
+uci set dhcp.@dnsmasq[0].strictorder=1             # КРИТИЧНО: см. ниже
+uci set dhcp.@dnsmasq[0].cachesize=3000            # увеличенный DNS-кэш
 uci commit dhcp
 /etc/init.d/dnsmasq restart
 echo DNS_OK
 EOF
 ```
+
+> **Зачем `strictorder=1`**: без него dnsmasq опрашивает все upstream-серверы **параллельно** и берёт первый ответ. Fallback `77.88.8.8` идёт напрямую с роутера в WAN (не через VLESS) и попадает под DPI-хайджек провайдера для заблокированных доменов (themoviedb.org и др.) — Yandex/провайдер возвращают `127.0.0.1` быстрее чем DoH через VLESS, dnsmasq берёт фейк. `strictorder` заставляет dnsmasq идти строго по порядку: сначала `127.0.0.1#5300` (xray с корректным резолвом), fallback только при молчании xray.
+>
+> **Зачем `cachesize=3000`**: стандартные 150 записей быстро переполняются при активном браузинге, промахи означают повторные запросы в xray → 8.8.8.8 через VLESS (медленно). 3000 записей — разумный размер при ~40 МБ RAM, доступной на AX3000T.
 
 Проверка DNS:
 ```bash
@@ -452,7 +461,8 @@ echo '=== [15] ERROR LOG ===' && tail -10 /var/log/xray/error.log 2>/dev/null ||
 | 4 | xray упал/завис | `procd_set_param respawn` (5 попыток, порог 3600s) | `grep respawn /etc/init.d/xray` |
 | 5 | Geo-базы устарели, сайты неверно маршрутизируются | cron каждое вс в 4:00 | `crontab -l` |
 | 6 | Yandex DNS недоступен | xray fallback на 8.8.8.8 (следующий сервер в списке) | автоматически |
-| 7 | DNS REFUSED при boot (xray ещё не стартовал, START=99) | fallback `77.88.8.8` в dnsmasq | `uci show dhcp \| grep server` |
+| 7 | DNS REFUSED при boot (xray ещё не стартовал, START=99) | fallback `77.88.8.8` в dnsmasq (опрашивается только если xray молчит, благодаря `strictorder=1`) | `uci show dhcp \| grep -E 'server\|strictorder'` |
+| 10 | Sinkhole `127.0.0.1` для заблокированных в РФ доменов | DoH-блок первым в `dns.servers`; `strictorder=1` в dnsmasq | `nslookup api.themoviedb.org 127.0.0.1` — должен вернуть реальный IP |
 | 8 | Routing loop (xray пакет снова перехвачен TProxy) | `sockopt: mark=255` на всех outbound; правило `mark=0xff → accept` в nftables | `grep mark /etc/init.d/xray`; `nft list ruleset` |
 | 9 | DHCP/broadcast заблокирован TProxy | правила `ip daddr 255.255.255.255 accept` и `udp dport {67,68} accept` | `nft list table inet xray_tproxy` |
 
@@ -576,6 +586,32 @@ dropbear SSH не поддерживает SFTP протокол.
 
 При появлении новых проблемных Cloudflare-сайтов — расширить `domains` этого сервера (пример: `"domain:discord.com"`, `"domain:medium.com"`).
 
+### 12. DNS-фильтрация у Yandex + параллельные запросы в dnsmasq = sinkhole 127.0.0.1
+
+**Симптом**: заблокированный в РФ домен (например `api.themoviedb.org`) резолвится в `127.0.0.1`. Приложения, которые пытаются подключиться, получают error 10061 (Connection refused) — TMDB Python Error в Kodi на Xbox, ошибки в десктопных клиентах, и т.д.
+
+**Причина (двойная)**:
+
+1. **Yandex DNS сам фильтрует** заблокированные в РФ домены и возвращает `127.0.0.1`. Даже запрос через VLESS к Yandex даст фейк — это не DPI провайдера, а политика самого сервиса.
+2. **dnsmasq без `strictorder` опрашивает upstream параллельно** и берёт первый ответ. Если `server='127.0.0.1#5300' '77.88.8.8'` — запрос идёт одновременно в xray и в Yandex напрямую. Yandex отвечает `127.0.0.1` быстрее, чем xray проходит через DoH VLESS → Cloudflare. dnsmasq кэширует фейк.
+3. Отдельно: если такой домен попал в `geosite:whitelist` и стоит в `dns.servers` **перед** DoH-блоком — xray сам пошлёт запрос в Yandex и получит тот же `127.0.0.1`.
+
+**Решение (три правки вместе)**:
+- В `config.json` блок DoH-сервера `1.1.1.1/dns-query` должен идти **первым** в `dns.servers` — чтобы его `domains:` матчились раньше `geosite:whitelist`.
+- В dnsmasq включить `strictorder=1` — опрашивать сначала `127.0.0.1#5300`, fallback только при молчании.
+- Проблемные домены добавлять в DoH-список (`domain:themoviedb.org`, `domain:tmdb.org` и т.д.).
+
+**Диагностика**: если `nslookup <домен> 127.0.0.1` возвращает `127.0.0.1` — идти сверху вниз:
+```bash
+# Через dnsmasq (цепочка полная)
+nslookup проблемный.домен 127.0.0.1
+# Напрямую в xray (минует dnsmasq)
+nslookup проблемный.домен 127.0.0.1 -port=5300
+# Напрямую в Yandex (без xray и VLESS)
+nslookup проблемный.домен 77.88.8.8
+```
+Если 127.0.0.1 вернул только первый запрос → проблема в dnsmasq (нужен `strictorder`). Если и xray вернул 127.0.0.1 → домен матчит Yandex-блок в xray, нужно добавить в DoH-список.
+
 ---
 
 ## F. Диагностика
@@ -619,6 +655,12 @@ ssh root@<<ROUTER_IP>> "cat /var/log/xray/geo-update.log 2>/dev/null || echo no_
 
 # Проверить что x.com резолвится в правильный Cloudflare IP (должен быть 172.66.x.x, а не 162.159.x.x)
 ssh root@<<ROUTER_IP>> "nslookup x.com 127.0.0.1"
+
+# Проверить что themoviedb резолвится в реальный IP, а не в 127.0.0.1 (sinkhole)
+ssh root@<<ROUTER_IP>> "nslookup api.themoviedb.org 127.0.0.1"
+
+# Проверить что включён strictorder и cachesize=3000
+ssh root@<<ROUTER_IP>> "uci show dhcp.@dnsmasq[0] | grep -E 'strictorder|cachesize|server'"
 ```
 
 ---
@@ -633,7 +675,7 @@ ssh root@<<ROUTER_IP>> "nslookup x.com 127.0.0.1"
 - **direct**: geoip:ru, geosite:category-ru, whitelist, steam, microsoft, apple, торренты 6881-6889, L2TP/IPsec
 - **block**: geosite:win-spy (телеметрия Windows дропается в никуда)
 - **proxy**: всё остальное → через VLESS
-- **Split DNS**: российские домены → Yandex DNS (прямо), Cloudflare-бренды (x.com, twitter.com и др.) → DoH 1.1.1.1 через VPN, остальные → 8.8.8.8 через VPN
+- **Split DNS**: DoH Cloudflare (приоритет) для x.com/twitter.com/t.co/twimg.com/themoviedb.org/tmdb.org, Yandex DNS для российских geosite (напрямую), 8.8.8.8 fallback через VPN; `strictorder` + `cachesize=3000` в dnsmasq для стабильности
 - Geo-базы обновляются автоматически каждое воскресенье в 4:00
 - WiFi только на 5GHz, 2.4GHz полностью отключён
 - ip rules восстанавливаются автоматически после перезапуска сети
