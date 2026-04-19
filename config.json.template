@@ -171,6 +171,13 @@
       },
       {
         "type": "field",
+        "outboundTag": "block",
+        "domain": ["domain:rutracker.org"],
+        "network": "udp",
+        "port": "443"
+      },
+      {
+        "type": "field",
         "outboundTag": "proxy",
         "network": "tcp,udp"
       }
