@@ -694,6 +694,32 @@ nslookup проблемный.домен 77.88.8.8
 
 **Если провайдер когда-то включит IPv6 на корневом роутере** — просто так не начнёт утекать: без `odhcpd` и `ip6assign` LAN клиенты не получат IPv6. Включать осознанно, заодно добавив TProxy для IPv6 (`ip6tables` / `nft` в семействе `ip6`).
 
+### 15. Устройства, игнорирующие DHCP-DNS (Xbox, PS5, Chromecast и т.п.)
+
+**Симптом**: на Xbox/PS5/смарт-ТВ некоторые сервисы ведут себя странно — YouTube работает, а какие-нибудь kino.pub-плагины, Netflix-альтернативы, сервисы стриминга — нет. В xray `access.log` видны DNS-запросы от устройства **на внешние резолверы** (`udp:111.88.96.50:53 → direct`, `udp:8.8.8.8:53`, `udp:1.1.1.1:53`), а не на наш dnsmasq `192.168.2.1:53`.
+
+**Причина**: многие игровые консоли и медиа-устройства игнорируют DNS-адрес выданный по DHCP и ходят в **зашитые в прошивку резолверы**. Это задумано вендором (чтобы устройство работало даже при кривом DHCP), но ломает split-DNS на VPN-роутере: запросы не попадают ни в наш DoH-Cloudflare, ни в Yandex, получают IP "как есть" от провайдера (часто с DNS-хайджеком РКН → sinkhole на заблокированные домены).
+
+**Решение**: DNAT всех DNS-запросов от LAN назад в локальный dnsmasq. Таблица `dns_hijack` в `nat prerouting` (приоритет `dstnat`, -100) плюс `accept` для DNS в `xray_tproxy` mangle chain (приоритет `mangle`, -150) — чтобы TProxy не перехватил DNS-пакет раньше, чем до него добрался DNAT.
+
+Настроено в `xray-tproxy-setup.sh`:
+
+```sh
+# DNS passthrough — пропускаем DNS мимо tproxy, чтобы nat prerouting успел сделать DNAT
+nft add rule inet xray_tproxy prerouting iifname br-lan udp dport 53 accept
+nft add rule inet xray_tproxy prerouting iifname br-lan tcp dport 53 accept
+
+# DNS hijack: любой DNS-запрос не на 192.168.2.1 DNAT-ится в dnsmasq
+nft add table inet dns_hijack
+nft add chain inet dns_hijack prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'
+nft add rule inet dns_hijack prerouting iifname br-lan udp dport 53 ip daddr != 192.168.2.1 dnat ip to 192.168.2.1:53
+nft add rule inet dns_hijack prerouting iifname br-lan tcp dport 53 ip daddr != 192.168.2.1 dnat ip to 192.168.2.1:53
+```
+
+**Важно**: правила DNAT **не применяются к уже существующим conntrack-сессиям**. После добавления правил устройства со старыми UDP-сессиями (Xbox их держит ~23 штуки на DNS:53) продолжат слать туда, куда шли раньше. Решение — **перезагрузить устройство** или переподключить его сеть (Wi-Fi off/on). На роутере `conntrack-tools` в OpenWrt из коробки нет, sysctl-трюк через `nf_conntrack_udp_timeout=1` почти не помогает.
+
+**Верификация**: после перезагрузки устройства запросы к хардкоженным DNS в xray `access.log` исчезают. В `/proc/net/nf_conntrack` видно что original direction смотрит на внешний резолвер, а reply direction — с `192.168.2.1:53` (dnsmasq ответил за чужое имя).
+
 ---
 
 ## F. Диагностика
