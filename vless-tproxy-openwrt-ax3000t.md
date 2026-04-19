@@ -346,6 +346,44 @@ ssh root@<<ROUTER_IP>> "nslookup youtube.com 127.0.0.1 && nslookup yandex.ru 127
 
 > **DNS в config.json**: конфиг должен содержать секцию `dns` с серверами Yandex и 8.8.8.8, inbound `dns-in` на порту 5300, outbound `dns` и routing rule `dns-in → dns-out`. Подробности в `config.json.template`.
 
+### Шаг 6.5: Отключение IPv6 на LAN
+
+**Зачем**: TProxy настроен только на IPv4. Если клиенты получают IPv6-адреса (через ULA от `odhcpd`) и DNS возвращает AAAA-записи, браузер делает Happy Eyeballs — сначала пробует IPv6, ждёт таймаут (~300 мс), потом падает на IPv4. Это видимая задержка первой загрузки каждой страницы. Плюс страховка от утечек: если провайдер когда-то включит IPv6 на WAN, трафик не пойдёт мимо xray.
+
+Применяется два уровня защиты одновременно:
+- `filter_aaaa=1` — dnsmasq вырезает AAAA из DNS-ответов (клиент не узнает про IPv6-адреса сайтов)
+- Отключение `odhcpd` и удаление `ip6assign` — клиент вообще не получает IPv6-адрес
+
+```bash
+ssh root@<<ROUTER_IP>> << 'EOF'
+# Фильтровать AAAA в DNS-ответах
+uci set dhcp.@dnsmasq[0].filter_aaaa=1
+# Не раздавать IPv6 prefix на LAN
+uci delete network.lan.ip6assign
+# Остановить и отключить DHCPv6/RA сервер
+/etc/init.d/odhcpd stop
+/etc/init.d/odhcpd disable
+uci commit dhcp
+uci commit network
+/etc/init.d/dnsmasq restart
+/etc/init.d/network reload
+echo IPV6_DISABLED
+EOF
+```
+
+Верификация:
+```bash
+ssh root@<<ROUTER_IP>> "
+ip -6 addr show br-lan | grep inet6      # должен быть только fe80::... (link-local)
+ps | grep odhcpd | grep -v grep || echo 'odhcpd stopped'
+nslookup -type=AAAA youtube.com 127.0.0.1 # AAAA должен быть пуст
+"
+```
+
+> **Глобальный ULA `fdd8:...` на br-lan сразу не пропадёт** — после `network reload` он остаётся в state `deprecated dynamic` до истечения lifetime. Это нормально: deprecated-адрес не используется для новых исходящих соединений. После следующей перезагрузки роутера его не будет вовсе.
+>
+> **У клиентов IPv6 исчезает через несколько минут** (когда истечёт lifetime последнего RA). Для ускорения — переподключить Wi-Fi на каждом устройстве.
+
 ### Шаг 7: WiFi — только 5GHz
 
 ```bash
@@ -624,6 +662,18 @@ nslookup проблемный.домен 77.88.8.8
 
 При появлении похожей проблемы с другим сайтом — расширить `domains` правила (пример: `"domain:anotherblockedsite.com"`).
 
+### 14. IPv6 Happy Eyeballs добавляет 300 мс к первой загрузке каждого сайта
+
+**Симптом**: первая загрузка страниц (особенно Google-сервисов, YouTube) ощутимо медленнее. Вторая — мгновенная.
+
+**Причина**: browser-алгоритм Happy Eyeballs (RFC 8305) при получении A+AAAA параллельно пробует IPv6 первым. У клиента есть ULA-адрес (`fdd8:.../60` от `odhcpd`), у youtube есть AAAA-запись. Пакет уходит с ULA src на глобальный IPv6 dst, добирается до роутера, **там нет IPv6 default route** (провайдер не раздаёт IPv6 на WAN) → пакет дропается → таймаут ~300 мс → fallback на IPv4.
+
+**Это не утечка** — трафик не уходит мимо TProxy, потому что IPv6 физически некуда отправить. Но задержка накапливается на каждом новом домене.
+
+**Решение**: см. Шаг 6.5 — `filter_aaaa=1` + отключение `odhcpd`/`ip6assign`. После этого DNS не отдаёт AAAA и клиент не имеет IPv6 — Happy Eyeballs сразу идёт по IPv4.
+
+**Если провайдер когда-то включит IPv6 на корневом роутере** — просто так не начнёт утекать: без `odhcpd` и `ip6assign` LAN клиенты не получат IPv6. Включать осознанно, заодно добавив TProxy для IPv6 (`ip6tables` / `nft` в семействе `ip6`).
+
 ---
 
 ## F. Диагностика
@@ -688,6 +738,7 @@ ssh root@<<ROUTER_IP>> "uci show dhcp.@dnsmasq[0] | grep -E 'strictorder|cachesi
 - **block**: geosite:win-spy (телеметрия Windows дропается в никуда)
 - **proxy**: всё остальное → через VLESS
 - **Split DNS**: DoH Cloudflare (приоритет) для x.com/twitter.com/t.co/twimg.com/themoviedb.org/tmdb.org, Yandex DNS для российских geosite (напрямую), 8.8.8.8 fallback через VPN; `strictorder` + `cachesize=3000` в dnsmasq для стабильности
+- **IPv6 на LAN отключён** (`filter_aaaa=1` + `odhcpd` off + `ip6assign` removed) — убирает задержку Happy Eyeballs и исключает утечки мимо TProxy
 - Geo-базы обновляются автоматически каждое воскресенье в 4:00
 - WiFi только на 5GHz, 2.4GHz полностью отключён
 - ip rules восстанавливаются автоматически после перезапуска сети
