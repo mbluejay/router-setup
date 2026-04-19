@@ -308,9 +308,13 @@ EOF
 ```
 LAN клиент → dnsmasq :53 → xray :5300
                               ↓ routing:
-               RU домены → Yandex DNS 77.88.8.8 (primary) / 77.88.8.1 (secondary) → direct
-               Остальное  → 8.8.8.8 → proxy (через VPN)
+               RU домены      → Yandex DNS 77.88.8.8 / 77.88.8.1 → direct
+               Cloudflare-бренды (x.com, twitter.com, t.co, twimg.com)
+                              → DoH 1.1.1.1/dns-query → proxy
+               Остальное      → 8.8.8.8 → proxy (через VPN)
 ```
+
+> **Почему отдельный DoH для Cloudflare-брендов**: Google DNS через VLESS-сервер отдаёт anycast-IP Cloudflare "ближайший к VPN-серверу", а не к клиенту. Для некоторых сайтов (например x.com) возвращается специализированный edge (из диапазона Discord), который не роутит SNI корректно — страница бесконечно грузится. Cloudflare DNS (1.1.1.1 DoH) знает свою инфраструктуру и отдаёт IP, работающий с любым из своих сайтов. Подробности — в подводном камне #11.
 
 ```bash
 ssh root@<<ROUTER_IP>> << 'EOF'
@@ -560,6 +564,18 @@ dropbear SSH не поддерживает SFTP протокол.
 
 **Fallback**: `77.88.8.8` в dnsmasq для первых секунд boot (xray стартует позже dnsmasq).
 
+### 11. Cloudflare anycast через Google DNS даёт "не тот" edge
+
+**Симптом**: x.com, twitter.com и подобные Cloudflare-сайты грузятся медленно или бесконечно. В логах xray видно соединения к разным IP одного и того же домена, например:
+- `162.159.140.229:443 → proxy` — edge из диапазона Discord, SNI=x.com там не работает
+- `172.66.0.227:443 → proxy` — обычный Cloudflare edge, работает
+
+**Причина**: xray резолвит через `8.8.8.8` по VLESS. Google DNS видит запрос от IP VPN-сервера и возвращает Cloudflare edge ближайший к нему, а не к клиенту. Cloudflare anycast может выдать edge, привязанный к конкретному сервису (например Discord).
+
+**Решение**: в `dns.servers` добавлен отдельный DoH-резолвер Cloudflare (`https://1.1.1.1/dns-query`) для проблемных доменов. Cloudflare DNS знает свою инфраструктуру и отдаёт IP, работающий с любым SNI.
+
+При появлении новых проблемных Cloudflare-сайтов — расширить `domains` этого сервера (пример: `"domain:discord.com"`, `"domain:medium.com"`).
+
 ---
 
 ## F. Диагностика
@@ -600,6 +616,9 @@ ssh root@<<ROUTER_IP>> "ls -lh /usr/local/etc/xray/*.dat"
 
 # Последнее обновление geo-баз (из cron)
 ssh root@<<ROUTER_IP>> "cat /var/log/xray/geo-update.log 2>/dev/null || echo no_log"
+
+# Проверить что x.com резолвится в правильный Cloudflare IP (должен быть 172.66.x.x, а не 162.159.x.x)
+ssh root@<<ROUTER_IP>> "nslookup x.com 127.0.0.1"
 ```
 
 ---
@@ -614,7 +633,7 @@ ssh root@<<ROUTER_IP>> "cat /var/log/xray/geo-update.log 2>/dev/null || echo no_
 - **direct**: geoip:ru, geosite:category-ru, whitelist, steam, microsoft, apple, торренты 6881-6889, L2TP/IPsec
 - **block**: geosite:win-spy (телеметрия Windows дропается в никуда)
 - **proxy**: всё остальное → через VLESS
-- **Split DNS**: российские домены → Yandex DNS (прямо), остальные → 8.8.8.8 (через VPN)
+- **Split DNS**: российские домены → Yandex DNS (прямо), Cloudflare-бренды (x.com, twitter.com и др.) → DoH 1.1.1.1 через VPN, остальные → 8.8.8.8 через VPN
 - Geo-базы обновляются автоматически каждое воскресенье в 4:00
 - WiFi только на 5GHz, 2.4GHz полностью отключён
 - ip rules восстанавливаются автоматически после перезапуска сети
