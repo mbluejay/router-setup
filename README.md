@@ -22,6 +22,9 @@
 
 - **Прозрачный прокси** через TProxy (nftables) — ничего не настраивать на клиентах
 - **Split-routing**: российское напрямую, остальное через VLESS
+  - direct: `geoip:ru`, `geosite:category-ru`, `geosite:whitelist`, `geosite:steam`, `geosite:microsoft`, `geosite:apple`, `tpass.me`, торренты 6881–6889
+  - block: `geosite:win-spy` (телеметрия Windows → blackhole)
+  - proxy: всё остальное
 - **Split-DNS**: DoH Cloudflare для проблемных доменов, Yandex для RU, 8.8.8.8 fallback через VPN
 - **WiFi**: только 5ГГц (2.4ГГц отключён)
 - **Блокировка** Windows-телеметрии (win-spy → blackhole)
