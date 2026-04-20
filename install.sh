@@ -480,11 +480,11 @@ EOF
       },
       {
         "address": "77.88.8.8",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
+        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"]
       },
       {
         "address": "77.88.8.1",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
+        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"]
       },
       "8.8.8.8"
     ]
@@ -539,7 +539,7 @@ $stream
                "162.254.192.0/18", "185.25.182.0/23", "185.86.148.0/22", "192.69.96.0/22",
                "198.52.192.0/22", "199.59.148.0/22", "205.196.6.0/23", "208.64.200.0/22"] },
       { "type": "field", "outboundTag": "direct",
-        "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple"] },
+        "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"] },
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
       { "type": "field", "outboundTag": "block", "domain": ["domain:rutracker.org"], "network": "udp", "port": "443" },
