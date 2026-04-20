@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Промпт для Claude Code: установка VLESS TProxy на Xiaomi AX3000T (OpenWrt).
+
+  Использование: "Открой этот файл и выполни настройку роутера согласно описанному здесь".
+  Claude прочитает <steps>, запросит у пользователя нужные параметры, выполнит установку.
+
+  Этот файл дублирует человеческую документацию vless-tproxy-openwrt-ax3000t.md,
+  но в строго структурированном формате для AI-агента.
+-->
+
+<project>
+  <name>VLESS TProxy на Xiaomi AX3000T (OpenWrt 25.x)</name>
+  <goal>
+    Настроить прозрачный VPN-роутер: все LAN-клиенты пользуются VLESS автоматически,
+    российский трафик идёт direct, остальной через VLESS.
+  </goal>
+  <companion_docs>
+    <doc path="vless-tproxy-openwrt-ax3000t.md" audience="human">
+      Человеческая документация — архитектура, обзор, диагностика.
+    </doc>
+    <doc path="README.md" audience="human">
+      Обзор всех файлов репозитория и точка входа.
+    </doc>
+  </companion_docs>
+</project>
+
+<environment>
+  <host_os>Windows 10+, Linux, macOS</host_os>
+  <host_shell priority="1">Git Bash (bash) — предпочтительно</host_shell>
+  <host_shell priority="2">WSL</host_shell>
+  <host_shell priority="3">PowerShell — fallback, heredoc не работает, файлы через scp</host_shell>
+  <router>Xiaomi Mi Router AX3000T, aarch64_cortex-a53, MediaTek MT7981B</router>
+  <openwrt>25.x (24.x тоже работает)</openwrt>
+  <package_manager>apk (Alpine Package Keeper), НЕ opkg</package_manager>
+  <ssh_user>root</ssh_user>
+  <working_dir>$USERPROFILE/router-setup/ (Windows) или ~/router-setup/ (Linux/macOS)</working_dir>
+</environment>
+
+<absolute_constraints>
+  <rule>НЕ модифицировать файлы вне рабочей директории пользователя</rule>
+  <rule>НЕ изменять реестр Windows, системные папки, переменные окружения системного уровня</rule>
+  <rule>НЕ устанавливать пакеты глобально на хост (winget, choco, npm -g и т.д.)</rule>
+  <rule>НЕ трогать локальные сетевые адаптеры (только читать состояние)</rule>
+  <rule>Все деструктивные операции — ИСКЛЮЧИТЕЛЬНО через SSH на роутер</rule>
+  <rule>Перед каждой деструктивной операцией (смена IP роутера, перезагрузка, network restart) — предупредить пользователя</rule>
+</absolute_constraints>
+
+<technical_invariants>
+  <invariant name="scp-flag">Всегда scp -O. dropbear на OpenWrt не поддерживает SFTP.</invariant>
+  <invariant name="line-endings">Все файлы на роутер с LF (не CRLF). В PowerShell: [System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))</invariant>
+  <invariant name="xray-env">Все вызовы xray: XRAY_LOCATION_ASSET=/usr/local/etc/xray /usr/local/bin/xray ...</invariant>
+  <invariant name="ssh-askpass">Для неинтерактивного SSH: SSH_ASKPASS="$PWD/askpass.sh" SSH_ASKPASS_REQUIRE=force DISPLAY=1 ssh ... Просто SSH_ASKPASS без REQUIRE=force игнорируется если есть TTY.</invariant>
+  <invariant name="router-own-traffic">TProxy перехватывает только PREROUTING. Трафик роутера (wget/curl с CLI) не проксируется — это нормально.</invariant>
+  <invariant name="fwmark-255">Все outbound xray имеют sockopt.mark=255 (0xff). nftables правило meta mark 0xff accept — чтобы пакеты от xray не попадали обратно в TProxy.</invariant>
+  <invariant name="tmpfs-var-log">/var/log это tmpfs. После reboot /var/log/xray исчезает — init.d должен делать mkdir -p /var/log/xray в start_service().</invariant>
+</technical_invariants>
+
+<parameters>
+  <param name="ROUTER_IP" required="true" default="192.168.1.1">
+    IP роутера. После factory reset — 192.168.1.1. Если раньше меняли — может быть 192.168.2.1 и т.п.
+  </param>
+  <param name="ROOT_PASSWORD" required="true" can_be_empty="true">
+    Root пароль SSH. На свежем OpenWrt может быть пустой.
+  </param>
+  <param name="VLESS_URL" required="true">
+    VLESS-ссылка формата:
+    vless://UUID@SERVER:PORT?security=reality&amp;pbk=PUBKEY&amp;sni=SNI&amp;fp=chrome&amp;flow=xtls-rprx-vision&amp;sid=SID#NAME
+    Парсинг — см. секцию vless_url_parsing ниже.
+  </param>
+  <param name="WIFI_SSID" required="true">Имя WiFi сети 5ГГц AP</param>
+  <param name="WIFI_PASSWORD" required="true" min_length="8">Пароль WiFi (мин 8 симв, WPA2)</param>
+  <param name="NEW_LAN_IP" required="false" default="192.168.2.1">
+    Новый LAN IP если роутер не прямой (за другим роутером). Если 192.168.1.x занят корневым — ставить 192.168.2.1.
+  </param>
+  <param name="HOTSPOT_SSID" required="if booting via WiFi WAN">
+    SSID телефона-хотспота для начальной загрузки пакетов если нет кабельного WAN.
+  </param>
+  <param name="HOTSPOT_PASSWORD" required="if booting via WiFi WAN"/>
+</parameters>
+
+<vless_url_parsing>
+  <pattern>vless://[UUID]@[SERVER]:[PORT]?[QUERY]#[NAME]</pattern>
+  <field name="VLESS_UUID" source="до @ после vless://"/>
+  <field name="VLESS_SERVER" source="после @ до :"/>
+  <field name="VLESS_PORT" source="после : до ?"/>
+  <field name="VLESS_SECURITY" query_param="security" values="reality|tls|none"/>
+  <field name="VLESS_PBKEY" query_param="pbk" required_if="security=reality"/>
+  <field name="VLESS_SNI" query_param="sni"/>
+  <field name="VLESS_FP" query_param="fp" default="chrome"/>
+  <field name="VLESS_FLOW" query_param="flow" default="xtls-rprx-vision"/>
+  <field name="VLESS_SID" query_param="sid" optional="true" default_if_missing=""/>
+  <field name="VLESS_TRANSPORT" query_param="type" default="tcp" values="tcp|ws|grpc"/>
+  <field name="VLESS_PATH" query_param="path" required_if="transport=ws|grpc"/>
+  <field name="VLESS_HOST" query_param="host" required_if="transport=ws"/>
+  <post_action>
+    Вывести все распознанные поля в читаемом виде. Подождать подтверждения пользователя перед продолжением.
+  </post_action>
+</vless_url_parsing>
+
+<stream_settings_templates>
+  <template when="security=reality and transport=tcp">
+    {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "serverName": "&lt;&lt;VLESS_SNI&gt;&gt;",
+        "fingerprint": "&lt;&lt;VLESS_FP&gt;&gt;",
+        "publicKey": "&lt;&lt;VLESS_PBKEY&gt;&gt;",
+        "shortId": "&lt;&lt;VLESS_SID&gt;&gt;"
+      }
+    }
+  </template>
+  <template when="security=tls and transport=ws">
+    {
+      "network": "ws",
+      "security": "tls",
+      "tlsSettings": {
+        "serverName": "&lt;&lt;VLESS_SNI&gt;&gt;",
+        "fingerprint": "&lt;&lt;VLESS_FP&gt;&gt;"
+      },
+      "wsSettings": {
+        "path": "&lt;&lt;VLESS_PATH&gt;&gt;",
+        "headers": { "Host": "&lt;&lt;VLESS_HOST&gt;&gt;" }
+      }
+    }
+  </template>
+  <template when="security=tls and transport=grpc">
+    {
+      "network": "grpc",
+      "security": "tls",
+      "tlsSettings": { "serverName": "&lt;&lt;VLESS_SNI&gt;&gt;" },
+      "grpcSettings": { "serviceName": "&lt;&lt;VLESS_PATH&gt;&gt;" }
+    }
+  </template>
+</stream_settings_templates>
+
+<steps>
+  <step id="0" name="collect-parameters">
+    <action>Запросить у пользователя все параметры из &lt;parameters&gt;</action>
+    <action>Распарсить VLESS_URL согласно &lt;vless_url_parsing&gt;</action>
+    <action>Показать распознанные значения, запросить подтверждение</action>
+  </step>
+
+  <step id="1" name="check-router-connectivity">
+    <check>ping -c 3 &lt;&lt;ROUTER_IP&gt;&gt;</check>
+    <check>ssh -o ConnectTimeout=10 root@&lt;&lt;ROUTER_IP&gt;&gt; "uname -m &amp;&amp; cat /etc/openwrt_release | head -3"</check>
+    <expect>uname -m == aarch64</expect>
+    <expect>openwrt_release содержит "OpenWrt"</expect>
+    <on_failure>
+      Сообщить пользователю: проверить кабель (LAN порт, не WAN), IP роутера, брандмауэр Windows.
+      Если это не OpenWrt — дать ссылку на инструкцию прошивки openwrt.org/toh/xiaomi/ax3000t, прекратить.
+    </on_failure>
+  </step>
+
+  <step id="2" name="internet-on-router">
+    <precondition>Роутеру нужен интернет для скачивания пакетов</precondition>
+    <option name="cable">WAN кабель от корневого роутера/провайдера</option>
+    <option name="wifi-wan">Подключить роутер к WiFi-хотспоту</option>
+    <check>ssh root@&lt;&lt;ROUTER_IP&gt;&gt; "ping -c 3 8.8.8.8"</check>
+  </step>
+
+  <step id="3" name="bootstrap-xray-http-proxy">
+    <problem>apk update падает с SSL ошибкой (Fastly CDN заблокирован в РФ, busybox wget+mbedTLS ломается)</problem>
+    <solution>Поднять xray как HTTP proxy до установки пакетов, репо на HTTP через этот proxy</solution>
+    <actions>
+      <action>scp -O bin/xray на /usr/local/bin/xray; chmod +x</action>
+      <action>Создать /tmp/proxy.json с минимальным HTTP-inbound + VLESS outbound (шаблон proxy-only.json.template)</action>
+      <action>Запустить xray: /usr/local/bin/xray run -c /tmp/proxy.json > /tmp/xray-proxy.log 2>&amp;1 &amp;</action>
+      <action>Тест: http_proxy=http://127.0.0.1:8118 wget -q --timeout=15 -O /dev/null http://example.com</action>
+      <action>sed -i 's|https://|http://|g' /etc/apk/repositories.d/distfeeds.list</action>
+    </actions>
+  </step>
+
+  <step id="4" name="install-packages">
+    <command>export http_proxy=http://127.0.0.1:8118 &amp;&amp; apk update &amp;&amp; apk add wget unzip kmod-tun ip-full nftables kmod-nft-tproxy kmod-nft-socket</command>
+    <post>sed -i 's|http://downloads|https://downloads|g' /etc/apk/repositories.d/distfeeds.list</post>
+    <note>apk ставит wget-nossl как зависимость — он не умеет HTTPS. Именно поэтому репо переключены на HTTP на время apk add.</note>
+  </step>
+
+  <step id="5" name="install-xray-infrastructure">
+    <substep id="5a" name="dirs">mkdir -p /usr/local/etc/xray /var/log/xray</substep>
+    <substep id="5b" name="geo-bases">
+      Скачать (через proxy или позже):
+      - geoip.dat от github.com/v2fly/geoip/releases/latest
+      - geosite.dat от github.com/hydraponique/roscomvpn-geosite/releases/latest
+    </substep>
+    <substep id="5c" name="config.json">
+      Сформировать из config.json.template — подставить VLESS_* значения, выбрать STREAM_SETTINGS по транспорту.
+      scp -O config.json на /usr/local/etc/xray/config.json
+      Тест: XRAY_LOCATION_ASSET=/usr/local/etc/xray /usr/local/bin/xray run -test -c /usr/local/etc/xray/config.json
+      Ожидается: "Configuration OK"
+    </substep>
+    <substep id="5d" name="tproxy-setup.sh">
+      scp -O xray-tproxy-setup.sh на /usr/local/bin/xray-tproxy-setup.sh; chmod +x
+      Содержит: ip rule, ip route table 100, nft table xray_tproxy (mangle prerouting), nft table dns_hijack (nat prerouting)
+    </substep>
+    <substep id="5e" name="init.d">
+      scp -O xray-init на /etc/init.d/xray; chmod +x
+      Критично: start_service() делает mkdir -p /var/log/xray до procd_open_instance
+      Запускает xray-tproxy-setup.sh до xray
+    </substep>
+    <substep id="5f" name="geo-update.sh">
+      scp -O xray-geo-update.sh на /usr/local/bin/xray-geo-update.sh; chmod +x
+    </substep>
+    <substep id="5g" name="log-truncate.sh">
+      scp -O xray-log-truncate.sh на /usr/local/bin/xray-log-truncate.sh; chmod +x
+      Обрезает access.log если &gt; 10 МБ (оставляет последние 2000 строк). Использует wc -c (stat отсутствует в busybox).
+    </substep>
+    <substep id="5h" name="hotplug">
+      Создать /etc/hotplug.d/iface/99-xray-tproxy — восстанавливает ip rule/route на ifup.
+    </substep>
+    <substep id="5i" name="cron">
+      crontab:
+      0 4 * * 0 /usr/local/bin/xray-geo-update.sh       (geo-базы воскресенье 4:00)
+      0 * * * * /usr/local/bin/xray-log-truncate.sh     (обрезка логов ежечасно)
+    </substep>
+    <substep id="5j" name="start-service">
+      pkill -f 'xray run -c /tmp/proxy' (остановить bootstrap proxy)
+      /etc/init.d/xray enable &amp;&amp; /etc/init.d/xray start
+      sleep 4 &amp;&amp; /etc/init.d/xray status (ожидается "running")
+    </substep>
+  </step>
+
+  <step id="6" name="split-dns">
+    <actions>
+      <action>uci set dhcp.@dnsmasq[0].noresolv=1</action>
+      <action>uci delete dhcp.@dnsmasq[0].server (всё что было)</action>
+      <action>uci add_list dhcp.@dnsmasq[0].server="127.0.0.1#5300"</action>
+      <action>uci add_list dhcp.@dnsmasq[0].server="77.88.8.8" (fallback при медленном старте xray)</action>
+      <action>uci set dhcp.@dnsmasq[0].strictorder=1 (критично — без этого параллельный опрос Yandex даст sinkhole на заблокированные)</action>
+      <action>uci set dhcp.@dnsmasq[0].cachesize=3000</action>
+      <action>uci commit dhcp &amp;&amp; /etc/init.d/dnsmasq restart</action>
+    </actions>
+    <verification>
+      nslookup youtube.com 127.0.0.1     — реальный IP через proxy
+      nslookup yandex.ru 127.0.0.1       — 77.88.x.x напрямую
+      nslookup api.themoviedb.org 127.0.0.1 — реальный IP (не 127.0.0.1!)
+      nslookup x.com 127.0.0.1           — 172.66.x.x (не 162.159.x.x)
+    </verification>
+  </step>
+
+  <step id="6.5" name="disable-ipv6-on-lan">
+    <reason>TProxy только на IPv4, IPv6-запросы уходят мимо + Happy Eyeballs даёт 300 мс задержки</reason>
+    <actions>
+      <action>uci set dhcp.@dnsmasq[0].filter_aaaa=1</action>
+      <action>uci delete network.lan.ip6assign</action>
+      <action>/etc/init.d/odhcpd stop &amp;&amp; /etc/init.d/odhcpd disable</action>
+      <action>uci commit dhcp &amp;&amp; uci commit network</action>
+      <action>/etc/init.d/dnsmasq restart &amp;&amp; /etc/init.d/network reload</action>
+    </actions>
+  </step>
+
+  <step id="7" name="wifi-5ghz-only">
+    <actions>
+      <action>uci set wireless.radio0.disabled=1 (2.4ГГц навсегда off)</action>
+      <action>Для всех VAP на radio0: uci set wireless.&lt;iface&gt;.disabled=1</action>
+      <action>uci set wireless.radio1.disabled=0</action>
+      <action>uci set wireless.radio1.channel=auto</action>
+      <action>uci set wireless.radio1.htmode=HE80</action>
+      <action>uci set wireless.radio1.country=RU</action>
+      <action>uci set wireless.radio1.txpower=30</action>
+      <action>uci set wireless.default_radio1.mode=ap</action>
+      <action>uci set wireless.default_radio1.ssid='&lt;&lt;WIFI_SSID&gt;&gt;'</action>
+      <action>uci set wireless.default_radio1.encryption=psk2+ccmp</action>
+      <action>uci set wireless.default_radio1.key='&lt;&lt;WIFI_PASSWORD&gt;&gt;'</action>
+      <action>uci set wireless.default_radio1.disabled=0</action>
+      <action>uci set wireless.default_radio1.ieee80211r=0</action>
+      <action>uci commit wireless &amp;&amp; wifi down &amp;&amp; sleep 2 &amp;&amp; wifi up</action>
+    </actions>
+  </step>
+
+  <step id="8" name="change-lan-ip" optional="true">
+    <when>NEW_LAN_IP задан и отличается от ROUTER_IP</when>
+    <warning>SSH оборвётся после этого! Пользователь должен поменять IP своего сетевого адаптера.</warning>
+    <actions>
+      <action>uci set network.lan.ipaddr='&lt;&lt;NEW_LAN_IP&gt;&gt;'</action>
+      <action>uci set network.lan.netmask='255.255.255.0'</action>
+      <action>uci commit network</action>
+      <action>(sleep 2 &amp;&amp; /etc/init.d/network restart) &amp;</action>
+    </actions>
+    <post_action_for_user>
+      Поменять IP адаптера ноутбука: статический &lt;&lt;NEW_LAN_PREFIX&gt;&gt;.100 / 255.255.255.0 / GW &lt;&lt;NEW_LAN_IP&gt;&gt;
+    </post_action_for_user>
+  </step>
+
+  <step id="9" name="final-verification">
+    <check>/etc/init.d/xray status → running</check>
+    <check>XRAY_LOCATION_ASSET=/usr/local/etc/xray /usr/local/bin/xray run -test -c /usr/local/etc/xray/config.json → Configuration OK</check>
+    <check>nft list table inet xray_tproxy → таблица и правила на месте</check>
+    <check>nft list table inet dns_hijack → таблица и DNAT правила</check>
+    <check>ip rule show | grep fwmark → "from all fwmark 0x1 lookup 100"</check>
+    <check>ip route show table 100 → "local default dev lo"</check>
+    <check>netstat -ulnp | grep -E '5300|12345' → xray слушает</check>
+    <check>nslookup youtube.com 127.0.0.1 → реальный IP Google (не 0.0.0.0)</check>
+    <check>nslookup yandex.ru 127.0.0.1 → 77.88.x.x</check>
+    <check>uci show wireless | grep -E '(radio[01]\.disabled|default_radio1\.ssid)' → radio0=1, radio1=0</check>
+    <check>ls -lh /usr/local/etc/xray/*.dat → geoip.dat &gt;20M, geosite.dat &gt;50K</check>
+    <check>crontab -l → две записи (geo-update, log-truncate)</check>
+    <check>tail -5 /var/log/xray/error.log → только "Xray X.X.X started"</check>
+  </step>
+</steps>
+
+<pitfalls>
+  <pitfall id="1" name="apk-ssl-error-5">
+    <symptom>apk update выдаёт SSL error 5</symptom>
+    <cause>Fastly CDN (downloads.openwrt.org) заблокирован в РФ, busybox wget+mbedTLS ломается</cause>
+    <solution>Bootstrap через xray HTTP proxy + HTTP repos на время apk add (см. step 3-4)</solution>
+  </pitfall>
+  <pitfall id="2" name="wget-nossl-replaces">
+    <symptom>После apk add wget → HTTPS перестаёт работать</symptom>
+    <cause>apk ставит wget-nossl как зависимость, он не умеет HTTPS</cause>
+    <solution>Переключить репо на HTTP ДО apk add, вернуть HTTPS после</solution>
+  </pitfall>
+  <pitfall id="3" name="ip-rules-lost-on-network-restart">
+    <symptom>После /etc/init.d/network restart клиенты без интернета</symptom>
+    <cause>ip rule/route table 100 — in-memory, очищается</cause>
+    <solution>hotplug /etc/hotplug.d/iface/99-xray-tproxy восстанавливает на ifup</solution>
+  </pitfall>
+  <pitfall id="4" name="tmpfs-var-log-wipes">
+    <symptom>После reboot xray не стартует, логи пустые</symptom>
+    <cause>/var/log — tmpfs (116 МБ на AX3000T), wipes на boot + заполняется за 15-20ч</cause>
+    <solution>mkdir -p /var/log/xray в start_service() init.d + xray-log-truncate.sh в cron</solution>
+  </pitfall>
+  <pitfall id="5" name="scp-needs-O-flag">
+    <symptom>scp висит/падает</symptom>
+    <cause>dropbear на OpenWrt не поддерживает SFTP</cause>
+    <solution>scp -O всегда</solution>
+  </pitfall>
+  <pitfall id="6" name="router-own-traffic-bypass-tproxy">
+    <info>Трафик роутера (wget/curl с CLI) НЕ проксируется TProxy — PREROUTING не ловит OUTPUT. Это by design.</info>
+  </pitfall>
+  <pitfall id="7" name="routing-rule-order">
+    <rule>Порядок в routing важен:
+      1) dns-in → dns-out
+      2) block: win-spy (первым, иначе может попасть в direct)
+      3) direct: geoip:private, geoip:ru, Valve IPs
+      4) direct: geosite:whitelist/category-ru/steam/ms/apple
+      5) direct: port 6881-6889, udp 500/1701/4500
+      6) block: rutracker domain + udp 443 (QUIC)
+      7) proxy: catch-all (последним)
+    </rule>
+  </pitfall>
+  <pitfall id="8" name="dnsmasq-refused">
+    <symptom>nslookup возвращает REFUSED, сайты не открываются</symptom>
+    <cause>dnsmasq без upstream серверов</cause>
+    <solution>uci add_list server=127.0.0.1#5300 + 77.88.8.8 fallback, noresolv=1</solution>
+  </pitfall>
+  <pitfall id="9" name="cloudflare-wrong-edge-via-google-dns">
+    <symptom>x.com, twitter.com грузятся бесконечно</symptom>
+    <cause>Google DNS через VLESS выдаёт CF edge по местоположению VPN-сервера, не клиента. Для x.com возвращается Discord-range edge, SNI=x.com там не роутится</cause>
+    <solution>DoH https://1.1.1.1/dns-query в dns.servers для domain:x.com, twitter.com, t.co, twimg.com</solution>
+  </pitfall>
+  <pitfall id="10" name="dns-hijack-yandex-plus-parallel">
+    <symptom>themoviedb.org резолвится в 127.0.0.1, приложения Connection refused</symptom>
+    <cause>
+      Yandex DNS сам фильтрует заблокированные в РФ домены → 127.0.0.1.
+      Dnsmasq без strictorder опрашивает параллельно — Yandex быстрее DoH, sinkhole кэшируется.
+      Если домен в geosite:whitelist и Yandex стоит выше DoH в dns.servers — xray сам использует Yandex.
+    </cause>
+    <solution>Три правки вместе:
+      a) DoH-блок первым в dns.servers xray
+      b) strictorder=1 в dnsmasq
+      c) themoviedb.org, tmdb.org в DoH-список
+    </solution>
+  </pitfall>
+  <pitfall id="11" name="quic-via-vless-unreliable">
+    <symptom>rutracker.org / сайты с агрессивным CF WAF — бесконечная загрузка + CF timeout</symptom>
+    <cause>VLESS Reality оптимизирован под TCP, QUIC (UDP:443) через такой тоннель нестабилен на некоторых CF edge</cause>
+    <solution>routing rule: block для domain:rutracker.org + network:udp + port:443. Браузер деградирует на TCP/HTTP2</solution>
+    <caveat>xray не всегда успевает извлечь SNI из QUIC Initial — в access.log -&gt; block может не появляться, но страховка работает</caveat>
+  </pitfall>
+  <pitfall id="12" name="ipv6-happy-eyeballs-delay">
+    <symptom>Первая загрузка каждого домена на 300 мс дольше</symptom>
+    <cause>У клиентов ULA (odhcpd), DNS отдаёт AAAA, браузер пробует IPv6, у роутера нет IPv6 default → timeout → fallback IPv4</cause>
+    <solution>filter_aaaa=1 + odhcpd stop/disable + delete network.lan.ip6assign</solution>
+  </pitfall>
+  <pitfall id="13" name="devices-ignoring-dhcp-dns">
+    <symptom>Xbox/PS5/Chromecast: некоторые сервисы работают, другие — нет; в access.log запросы к 111.88.96.50, 8.8.8.8 и т.п. от этих устройств</symptom>
+    <cause>Устройства игнорируют DHCP DNS option, ходят на зашитые в прошивку резолверы. Split-DNS не работает.</cause>
+    <solution>DNAT all udp/tcp:53 от br-lan к не-192.168.2.1 → на 192.168.2.1:53 (табл. inet dns_hijack, nat prerouting). + accept 53 в xray_tproxy mangle до tproxy правил — чтобы DNAT успел сработать.</solution>
+    <caveat>Правила DNAT НЕ применяются к существующим conntrack-сессиям. После установки клиентов нужно перезагрузить или переподключить сеть.</caveat>
+  </pitfall>
+</pitfalls>
+
+<recovery_commands>
+  <command name="emergency-tproxy-off" when="клиенты без интернета">
+    nft delete table inet xray_tproxy; nft delete table inet dns_hijack; ip rule del fwmark 1 lookup 100; ip route flush table 100
+  </command>
+  <command name="restore-tproxy" when="хочется вернуть TProxy без рестарта xray">
+    /usr/local/bin/xray-tproxy-setup.sh
+  </command>
+  <command name="full-xray-restart">
+    /etc/init.d/xray restart
+  </command>
+  <command name="restore-ip-rules-manually" when="hotplug не сработал">
+    ip rule add fwmark 1 lookup 100; ip route add local default dev lo table 100
+  </command>
+  <command name="dnsmasq-refused-fix">
+    /etc/init.d/dnsmasq restart
+  </command>
+  <command name="force-geo-update">
+    /usr/local/bin/xray-geo-update.sh
+  </command>
+  <command name="force-log-truncate">
+    /usr/local/bin/xray-log-truncate.sh
+  </command>
+</recovery_commands>
+
+<file_locations>
+  <file path="/usr/local/bin/xray">Бинарник xray</file>
+  <file path="/usr/local/bin/xray-tproxy-setup.sh">nftables + ip rules</file>
+  <file path="/usr/local/bin/xray-geo-update.sh">Обновление geo-баз</file>
+  <file path="/usr/local/bin/xray-log-truncate.sh">Обрезка access.log</file>
+  <file path="/usr/local/etc/xray/config.json">Конфиг xray</file>
+  <file path="/usr/local/etc/xray/geoip.dat">База IP (v2fly)</file>
+  <file path="/usr/local/etc/xray/geosite.dat">База доменов (roscomvpn-geosite)</file>
+  <file path="/etc/init.d/xray">procd сервис</file>
+  <file path="/etc/hotplug.d/iface/99-xray-tproxy">Восстановление ip rules</file>
+  <file path="/var/log/xray/access.log">Лог доступа (tmpfs, обрезается cron)</file>
+  <file path="/var/log/xray/error.log">Лог ошибок</file>
+</file_locations>
+
+<geo_bases>
+  <source name="geoip.dat" url="https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" expected_size="&gt;20MB"/>
+  <source name="geosite.dat" url="https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" expected_size="&gt;50KB">
+    Содержит: whitelist, category-ru, steam, microsoft, apple, win-spy и др.
+  </source>
+</geo_bases>

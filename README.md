@@ -1,125 +1,116 @@
-# VLESS TProxy на Xiaomi AX3000T (OpenWrt 25.12.2)
+# VLESS TProxy на Xiaomi AX3000T
 
-Прозрачный прокси для обхода блокировок с умной маршрутизацией: российский трафик идёт напрямую, заблокированные сайты — через VLESS. Всё автоматически, без настройки на каждом устройстве.
+Прозрачный VPN-роутер на Xiaomi Mi Router AX3000T с OpenWrt и xray-core.
+Все устройства в сети автоматически пользуются VLESS без настройки.
 
----
+## TL;DR
 
-## Как это работает
-
-```
-Устройства в сети (телефон, ноутбук, TV)
-        ↓ обычный TCP/UDP
-Роутер Xiaomi AX3000T (OpenWrt)
-        ↓ nftables TProxy перехватывает весь трафик
-xray-core (порт 12345)
-        ↓ routing rules по geoip/geosite
-  ┌─────────────────────────────────┐
-  │ geoip:ru, geosite:category-ru,  │ → direct (напрямую)
-  │ whitelist, steam, microsoft,    │
-  │ apple, торренты 6881-6889       │
-  ├─────────────────────────────────┤
-  │ geosite:win-spy                 │ → block (телеметрия Windows дропается)
-  ├─────────────────────────────────┤
-  │ всё остальное                   │ → VLESS proxy (через VPN)
-  └─────────────────────────────────┘
-```
-
-**DNS** тоже умный: российские домены резолвятся через Yandex DNS напрямую, заблокированные сайты — через 8.8.8.8 по VPN.
-
----
-
-## Аппаратура
-
-| Параметр | Значение |
+| Хост | Команда |
 |---|---|
-| Роутер | Xiaomi Mi Router AX3000T |
-| Архитектура | `aarch64_cortex-a53` (MediaTek MT7981B) |
-| OpenWrt | 25.12.2 |
-| Пакетный менеджер | `apk` (Alpine Package Keeper, **не opkg**) |
-| xray-core | 26.x, linux/arm64 |
+| Linux / macOS / Windows Git Bash | `./install.sh` |
+| Windows PowerShell | `.\install.ps1` |
 
----
+Запускать **на своём компьютере** — скрипт сам подключается к роутеру по SSH.
+На роутер ничего копировать не нужно.
 
-## Правила маршрутизации
+Скрипт — интерактивное меню. Есть пункты **Full install**, **Custom install**, **Update**, **Diagnostics**, **Uninstall**.
 
-| Трафик | Куда |
-|---|---|
-| Приватные IP (10.x, 172.16.x, 192.168.x, 127.x) | direct |
-| geoip:ru (российские IP) | direct |
-| geosite:category-ru, whitelist | direct |
-| geosite:steam, microsoft, apple | direct |
-| Порты 6881–6889 TCP+UDP (торренты) | direct |
-| UDP 500, 1701, 4500 (L2TP/IPsec) | direct |
-| Диапазоны IP Valve Corp (AS32590) | direct |
-| geosite:win-spy (телеметрия Windows) | **block** |
-| Всё остальное | **proxy → VLESS** |
+Требования: Xiaomi AX3000T с установленным OpenWrt 25.x, SSH-доступ с root, рабочая VLESS-ссылка от своего VPN-сервера.
+Если OpenWrt ещё не стоит — сначала прошить его по инструкции [openwrt.org/toh/xiaomi/ax3000t](https://openwrt.org/toh/xiaomi/ax3000t).
 
----
+## Что делает
 
-## Что в этом репозитории
+- **Прозрачный прокси** через TProxy (nftables) — ничего не настраивать на клиентах
+- **Split-routing**: российское напрямую, остальное через VLESS
+- **Split-DNS**: DoH Cloudflare для проблемных доменов, Yandex для RU, 8.8.8.8 fallback через VPN
+- **WiFi**: только 5ГГц (2.4ГГц отключён)
+- **Блокировка** Windows-телеметрии (win-spy → blackhole)
+- **DNS-хайджек**: принудительно заворачивает DNS всех клиентов в локальный dnsmasq (фикс Xbox/PS5/Chromecast)
+- **IPv6 отключён** — нет Happy Eyeballs-задержек и IPv6-утечек
+- Авто-обновление geo-баз раз в неделю, ротация логов ежечасно
 
-| Файл | Описание |
-|---|---|
-| `vless-tproxy-openwrt-ax3000t.md` | Главный файл — инструкция и промпт для Claude Code |
-| `config.json.template` | Шаблон конфига xray с плейсхолдерами вместо реальных данных |
-| `proxy-only.json.template` | Шаблон временного HTTP proxy (нужен для установки пакетов) |
-| `xray-tproxy-setup.sh` | Скрипт настройки nftables TProxy и ip rules |
-| `xray-init` | Сервис init.d для автозапуска xray через procd |
-| `xray-geo-update.sh` | Скрипт еженедельного обновления geo-баз |
-| `bin/xray` | Скомпилированный бинарник xray для OpenWrt arm64 |
+Подробности — в [vless-tproxy-openwrt-ax3000t.md](vless-tproxy-openwrt-ax3000t.md).
 
----
-
-## Как использовать
-
-### Вариант 1 — с Claude Code (рекомендуется)
-
-Передай файл `vless-tproxy-openwrt-ax3000t.md` как инструкцию:
+## Меню установщика
 
 ```
-claude --add-file vless-tproxy-openwrt-ax3000t.md
+═══════════════════════════════════════
+  Xiaomi AX3000T · VLESS TProxy Setup
+═══════════════════════════════════════
+Router:   192.168.1.1
+OpenWrt:  25.12.2
+xray:     not installed
+
+ 1)  Connect to router / change IP
+ 2)  Full install
+ 3)  Custom install
+ 4)  Update
+ 5)  Diagnostics
+ 6)  Uninstall
+ 0)  Exit
 ```
 
-или скопируй содержимое в начало сессии Claude Code. Он запросит все нужные параметры и выполнит настройку сам.
+**Full install** — все фичи включены, одним проходом.
 
-### Вариант 2 — вручную
+**Custom install** — выбрать какие фичи нужны:
 
-Следуй пошаговой инструкции в `vless-tproxy-openwrt-ax3000t.md`.
+```
+ [x] 1) Core xray + TProxy + Split-DNS          (обязательно)
+ [x] 2) WiFi 5GHz-only (disable 2.4GHz)
+ [x] 3) IPv6 disable on LAN
+ [x] 4) DNS hijack (Xbox/PS5 fix)
+ [x] 5) Log rotation
+ [x] 6) Cloudflare DoH для x.com/twitter/themoviedb/...
+ [x] 7) QUIC block rutracker.org
+```
 
----
+**Update** — меняет VLESS-ссылку, обновляет geo-базы, переливает свежие версии скриптов. Идемпотентно — не трогает то что уже актуально.
 
-## Что нужно иметь заранее
+**Diagnostics** — статус xray, тест конфига, live access.log, DNS-проверки, полный audit.
 
-1. **VLESS-ссылку** от своего VPN-сервера в формате:
-   ```
-   vless://UUID@SERVER:PORT?security=reality&pbk=PUBKEY&sni=SNI&fp=chrome&flow=xtls-rprx-vision#NAME
-   ```
-2. **Xiaomi AX3000T** с установленным OpenWrt 25.x
-3. **Windows/Mac/Linux** с доступом к роутеру по кабелю (LAN-порт) или WiFi
-4. **SSH** (обычно уже есть: `ssh root@192.168.1.1`)
-5. **Интернет на роутере** — через WAN-кабель или временный WiFi WAN (см. инструкцию)
+**Uninstall** — откатывает xray-установку к состоянию до запуска скрипта.
+Установщик сохраняет снэпшот `uci` конфигурации до правок (dnsmasq, network, odhcpd) — откат возвращает их в исходное состояние.
+WiFi и LAN IP по умолчанию не трогает (они меняют сетевую топологию, откат без подтверждения опасен).
 
----
+## Ручной путь (без скрипта)
+
+Документ [vless-tproxy-openwrt-ax3000t.md](vless-tproxy-openwrt-ax3000t.md) описывает архитектуру, все команды и подводные камни. Можно поставить всё руками по нему, если не хочется скрипта.
+
+Для Claude Code / агентных запусков — [vless-tproxy-openwrt-ax3000t.claude.xml](vless-tproxy-openwrt-ax3000t.claude.xml). Структурированный промпт с шагами, подводными камнями и параметрами для парсинга VLESS URL.
+
+## Содержимое репозитория
+
+| Файл | Назначение |
+|---|---|
+| `README.md` | Этот файл — обзор и точка входа |
+| `vless-tproxy-openwrt-ax3000t.md` | Документация для человека — архитектура, диагностика, подводные камни |
+| `vless-tproxy-openwrt-ax3000t.claude.xml` | То же для Claude Code — структурированный XML-промпт |
+| `install.sh` | Интерактивный установщик (bash, Linux/macOS/Git Bash) |
+| `install.ps1` | Интерактивный установщик (PowerShell, Windows) |
+| `config.json.template` | Шаблон конфига xray с плейсхолдерами |
+| `proxy-only.json.template` | Шаблон временного HTTP proxy для bootstrap |
+| `xray-init` | init.d сервис procd |
+| `xray-tproxy-setup.sh` | nftables TProxy + ip rules + DNS hijack |
+| `xray-geo-update.sh` | Обновление geo-баз (cron еженедельно) |
+| `xray-log-truncate.sh` | Обрезка access.log (cron ежечасно) |
+| `bin/xray` | Бинарник xray для OpenWrt arm64 |
 
 ## Geo-базы
 
-Используются кастомные geo-базы для корректной работы в российском интернете:
+- **geoip.dat** — v2fly: `https://github.com/v2fly/geoip/releases/latest/download/geoip.dat`
+- **geosite.dat** — roscomvpn-geosite: `https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat`
 
-- **geoip.dat** — IP-базы: `https://github.com/v2fly/geoip/releases/latest/download/geoip.dat`
-- **geosite.dat** — Домены (включая whitelist, category-ru, win-spy и др.): `https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat`
-
-Базы обновляются автоматически каждое воскресенье в 4:00 через cron.
-
----
+Второй содержит специфичные для РФ категории: `whitelist`, `category-ru`, `steam`, `microsoft`, `apple`, `win-spy`.
 
 ## Отказоустойчивость
 
-- xray стартует автоматически при загрузке (init.d, START=99)
-- При краше — автоперезапуск через procd (respawn)
+- xray автостарт при загрузке (init.d, START=99)
+- При краше — автоперезапуск через procd
 - ip rules восстанавливаются через hotplug при перезапуске сети
 - `/var/log/xray/` пересоздаётся при каждом старте (tmpfs)
-- DNS работает даже если xray ещё не поднялся (fallback Yandex DNS)
+- DNS работает даже если xray ещё не поднялся — fallback на Yandex DNS
+- Логи обрезаются ежечасно — tmpfs не забивается
 
----
+## Лицензия и авторство
 
-*Проверено на OpenWrt 25.12.2, xray 26.3.27, апрель 2026*
+Проверено на OpenWrt 25.12.2 + xray 26.3.27, апрель 2026. Делал для себя, заработает у любого с той же моделью роутера.
