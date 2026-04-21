@@ -70,6 +70,12 @@
   </param>
   <param name="WIFI_SSID" required="true">Имя WiFi сети 5ГГц AP</param>
   <param name="WIFI_PASSWORD" required="true" min_length="8">Пароль WiFi (мин 8 симв, WPA2)</param>
+  <param name="WIFI_CHANNEL" required="false" default="auto">
+    Канал 5ГГц. Варианты: auto | 36 | 40 | 44 | 48 | 100 | 149.
+    Рекомендуется 36 в жилых домах (нижний диапазон, нет DFS, нет задержки при старте).
+    Канал 100 (DFS) — добавляет ~60 с радарного скана при первом запуске, зато почти пустой.
+    auto позволяет роутеру выбрать самостоятельно, но может попасть на перегруженный 149.
+  </param>
   <param name="NEW_LAN_IP" required="false" default="192.168.2.1">
     Новый LAN IP если роутер не прямой (за другим роутером). Если 192.168.1.x занят корневым — ставить 192.168.2.1.
   </param>
@@ -256,7 +262,7 @@
       <action>uci set wireless.radio0.disabled=1 (2.4ГГц навсегда off)</action>
       <action>Для всех VAP на radio0: uci set wireless.&lt;iface&gt;.disabled=1</action>
       <action>uci set wireless.radio1.disabled=0</action>
-      <action>uci set wireless.radio1.channel=auto</action>
+      <action>uci set wireless.radio1.channel='&lt;&lt;WIFI_CHANNEL|auto&gt;&gt;'</action>
       <action>uci set wireless.radio1.htmode=HE80</action>
       <action>uci set wireless.radio1.country=RU</action>
       <action>uci set wireless.radio1.txpower=30</action>
@@ -380,6 +386,22 @@
     <cause>Устройства игнорируют DHCP DNS option, ходят на зашитые в прошивку резолверы. Split-DNS не работает.</cause>
     <solution>DNAT all udp/tcp:53 от br-lan к не-192.168.2.1 → на 192.168.2.1:53 (табл. inet dns_hijack, nat prerouting). + accept 53 в xray_tproxy mangle до tproxy правил — чтобы DNAT успел сработать.</solution>
     <caveat>Правила DNAT НЕ применяются к существующим conntrack-сессиям. После установки клиентов нужно перезагрузить или переподключить сеть.</caveat>
+  </pitfall>
+  <pitfall id="14" name="wifi-channel-interference">
+    <symptom>WiFi тормозит у всех клиентов; iw dev &lt;iface&gt; station dump показывает tx_failed ≈ tx_retries (5–20% потерь)</symptom>
+    <cause>Канал из верхнего диапазона 5 ГГц (149, 153, 157…) перегружен соседними точками доступа в многоквартирных домах</cause>
+    <solution>
+      uci set wireless.radio1.channel=36
+      uci commit wireless &amp;&amp; wifi down &amp;&amp; sleep 2 &amp;&amp; wifi up
+      Диагностика: iw dev phy1-ap0 station dump | grep -E 'Station|tx (retries|failed)|expected'
+    </solution>
+    <note>Имя WiFi-интерфейса на AX3000T — phy1-ap0, не wlan1. Проверить через: iw dev | grep Interface</note>
+  </pitfall>
+  <pitfall id="15" name="ipv6-tproxy-bypass">
+    <symptom>Часть трафика обходит xray; ipv6-test.com показывает реальный IP провайдера</symptom>
+    <cause>TProxy перехватывает только IPv4. Если провайдер выдаёт WAN IPv6 и odhcpd транслирует префикс на LAN — клиенты получают глобальный IPv6 и ходят мимо xray</cause>
+    <solution>Использовать step 6.5 disable-ipv6-on-lan (filter_aaaa + odhcpd stop + удалить ip6assign)</solution>
+    <check>ip -6 addr show br-lan — не должно быть адресов вне fe80::/10</check>
   </pitfall>
 </pitfalls>
 
