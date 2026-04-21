@@ -31,6 +31,7 @@ ROOT_PASSWORD=""
 VLESS_URL=""
 WIFI_SSID=""
 WIFI_PASSWORD=""
+WIFI_CHANNEL="auto"
 NEW_LAN_IP=""
 
 # Parsed VLESS fields
@@ -80,6 +81,7 @@ save_state() {
 ROUTER_IP=$(printf '%q' "$ROUTER_IP")
 VLESS_URL=$(printf '%q' "$VLESS_URL")
 WIFI_SSID=$(printf '%q' "$WIFI_SSID")
+WIFI_CHANNEL=$(printf '%q' "$WIFI_CHANNEL")
 NEW_LAN_IP=$(printf '%q' "$NEW_LAN_IP")
 EOF
 }
@@ -703,7 +705,7 @@ feature_wifi_install() {
       uci set wireless.\${iface}.disabled=1
     done
     uci set wireless.radio1.disabled=0
-    uci set wireless.radio1.channel=auto
+    uci set wireless.radio1.channel="${WIFI_CHANNEL:-auto}"
     uci set wireless.radio1.htmode=HE80
     uci set wireless.radio1.country=RU
     uci set wireless.radio1.txpower=30
@@ -855,6 +857,7 @@ menu_custom_install() {
     render_feature log   "Log rotation" 5
     render_feature doh   "Cloudflare DoH for x.com/twitter/themoviedb" 6
     render_feature quic  "QUIC block rutracker.org" 7
+    printf '    c) WiFi канал: %-6s  [auto | 36 | 100 | 149]\n' "$WIFI_CHANNEL"
     printf '\n  9) Продолжить к установке\n'
     printf '  0) Назад\n\n'
     printf '> '
@@ -867,6 +870,13 @@ menu_custom_install() {
       5) toggle_feature log ;;
       6) toggle_feature doh ;;
       7) toggle_feature quic ;;
+      c|C)
+        case "$WIFI_CHANNEL" in
+          auto) WIFI_CHANNEL=36 ;;
+          36)   WIFI_CHANNEL=100 ;;
+          100)  WIFI_CHANNEL=149 ;;
+          *)    WIFI_CHANNEL=auto ;;
+        esac ;;
       9) break ;;
       0) return ;;
       *) log_warn "Неверный выбор"; sleep 1 ;;
