@@ -22,9 +22,10 @@
 
 - **Прозрачный прокси** через TProxy (nftables) — ничего не настраивать на клиентах
 - **Split-routing**: российское напрямую, остальное через VLESS
-  - direct: `geoip:ru`, `geosite:category-ru`, `geosite:whitelist`, `geosite:steam`, `geosite:microsoft`, `geosite:apple`, `tpass.me`, торренты 6881–6889
+  - direct: `geoip:ru`, `geosite:category-ru`, `geosite:whitelist`, `geosite:steam`, `geosite:microsoft`, `geosite:apple`, торренты 6881–6889
   - block: `geosite:win-spy` (телеметрия Windows → blackhole)
   - proxy: всё остальное
+- **Custom direct list**: команды `xray-add-direct <domain>` / `xray-remove-direct <domain>` — добавлять/удалять домены в обход VPN одной командой. Для сайтов, детектящих VPN по outbound IP (СБП-кассы, платёжные фингерпринт-сервисы)
 - **Split-DNS**: DoH Cloudflare для проблемных доменов, Yandex для RU, 8.8.8.8 fallback через VPN
 - **WiFi**: только 5ГГц (2.4ГГц отключён)
 - **Блокировка** Windows-телеметрии (win-spy → blackhole)
@@ -96,6 +97,11 @@ WiFi и LAN IP по умолчанию не трогает (они меняют 
 | `xray-tproxy-setup.sh` | nftables TProxy + ip rules + DNS hijack |
 | `xray-geo-update.sh` | Обновление geo-баз (cron еженедельно) |
 | `xray-log-truncate.sh` | Обрезка access.log (cron ежечасно) |
+| `xray-add-direct` | CLI на роутере: добавить домен в белый список (direct) |
+| `xray-remove-direct` | CLI на роутере: удалить домен из белого списка |
+| `custom-direct.list` | Seed-список кастомных direct-доменов (`tpass.me` как пример) |
+| `add-direct.sh` / `add-direct.ps1` | Клиентские обёртки — одна команда с ноутбука |
+| `remove-direct.sh` / `remove-direct.ps1` | Симметрично, удаление |
 | `bin/xray` | Бинарник xray для OpenWrt arm64 |
 
 ## Geo-базы

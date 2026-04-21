@@ -64,15 +64,19 @@
 ## Что и куда ставится
 
 ```
-/usr/local/bin/xray                    — бинарник xray
-/usr/local/bin/xray-tproxy-setup.sh    — nftables + ip rules (запускается при старте)
-/usr/local/bin/xray-geo-update.sh      — обновление geo-баз (cron)
-/usr/local/bin/xray-log-truncate.sh    — обрезка access.log (cron)
-/usr/local/etc/xray/config.json        — конфиг xray
-/usr/local/etc/xray/geoip.dat          — база IP (v2fly)
-/usr/local/etc/xray/geosite.dat        — база доменов (roscomvpn-geosite)
-/etc/init.d/xray                       — сервис procd (START=99)
-/etc/hotplug.d/iface/99-xray-tproxy    — восстановление ip rules при перезапуске сети
+/usr/local/bin/xray                      — бинарник xray
+/usr/local/bin/xray-tproxy-setup.sh      — nftables + ip rules (запускается при старте)
+/usr/local/bin/xray-geo-update.sh        — обновление geo-баз (cron)
+/usr/local/bin/xray-log-truncate.sh      — обрезка access.log (cron)
+/usr/local/bin/xray-add-direct           — CLI: добавить домен в обход VPN (direct)
+/usr/local/bin/xray-remove-direct        — CLI: удалить домен из белого списка
+/usr/local/etc/xray/config.json          — активный конфиг (регенерируется из шаблона)
+/usr/local/etc/xray/config.json.template — шаблон конфига, источник базы
+/usr/local/etc/xray/custom-direct.list   — список кастомных direct-доменов
+/usr/local/etc/xray/geoip.dat            — база IP (v2fly)
+/usr/local/etc/xray/geosite.dat          — база доменов (roscomvpn-geosite)
+/etc/init.d/xray                         — сервис procd (START=99)
+/etc/hotplug.d/iface/99-xray-tproxy      — восстановление ip rules при перезапуске сети
 ```
 
 ## Архитектура TProxy
@@ -130,6 +134,53 @@ LAN клиент → dnsmasq :53 → xray :5300
 
 **Почему порядок важен**: `themoviedb.org` попадает в `geosite:whitelist`. Если Yandex-блок стоит выше — он выиграет матч, Yandex сам возвращает `127.0.0.1` для заблокированных в РФ доменов.
 
+## Custom direct domains (белый список доменов)
+
+Некоторые сайты детектируют VPN не по DNS, а по outbound IP — через fingerprint-API. Пример: `pally.info` (СБП-платежи) делает запрос к `veryfy.ai`, тот возвращает IP VLESS-сервера — сайт показывает «выключите VPN». Решение — маршрутизировать и сам сайт, и его fingerprint-сервис в `direct`.
+
+Для таких случаев есть механизм: plain-text список доменов и CLI-утилита.
+
+### Как добавить
+
+```bash
+ssh root@<router> "xray-add-direct pally.info"
+ssh root@<router> "xray-add-direct veryfy.ai"
+```
+
+Или через клиентские обёртки (без необходимости запоминать IP роутера):
+
+```bash
+# Linux / macOS / Git Bash
+./add-direct.sh pally.info
+
+# Windows PowerShell
+.\add-direct.ps1 pally.info
+```
+
+### Как удалить
+
+```bash
+ssh root@<router> "xray-remove-direct pally.info"
+# или ./remove-direct.sh pally.info / .\remove-direct.ps1 pally.info
+```
+
+### Что происходит под капотом
+
+- Домен попадает в `/usr/local/etc/xray/custom-direct.list` (plain text, один на строку, отсортирован, дедуп)
+- Скрипт через `jq` инъектирует `"domain:X"` в `dns.servers[]` Yandex (77.88.8.8 / 77.88.8.1) и в direct-routing-rule
+- `config.json` регенерируется из `config.json.template` + свежего списка, валидируется через `xray run -test`, xray перезапускается
+- Шаблон остаётся неизменным — правки только в `custom-direct.list`
+
+### Что НЕ делает
+
+Не трогает IP-маршрутизацию (`geoip:ru`, Valve IP-ranges). Если сайт сидит на российском IP, он идёт direct и без добавления в этот список.
+
+### Посмотреть текущий список
+
+```bash
+ssh root@<router> "cat /usr/local/etc/xray/custom-direct.list"
+```
+
 ## Диагностика
 
 ```bash
@@ -176,7 +227,7 @@ ssh root@<router> "cat /proc/net/nf_conntrack | grep 'dport=53'"
 
 Fastly CDN (downloads.openwrt.org) заблокирован в РФ. Busybox wget + mbedTLS на OpenWrt 25.x падает с error 5.
 
-**Решение**: временно поднять xray как HTTP proxy (до полной установки), переключить репозитории на HTTP, установить пакеты через proxy, вернуть HTTPS. Скрипт `install.sh` делает это автоматически на этапе bootstrap.
+**Решение**: временно поднять xray как HTTP proxy (до полной установки), переключить репозитории на HTTP, установить пакеты через proxy, вернуть HTTPS. Скрипт `install.sh` делает это автоматически на этапе bootstrap. Среди устанавливаемых пакетов — `jq` (нужен для `xray-add-direct`/`xray-remove-direct` — они манипулируют JSON-конфигом).
 
 ### 2. wget-nossl заменяет busybox wget
 

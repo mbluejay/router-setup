@@ -482,11 +482,11 @@ EOF
       },
       {
         "address": "77.88.8.8",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"]
+        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
       },
       {
         "address": "77.88.8.1",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"]
+        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
       },
       "8.8.8.8"
     ]
@@ -541,7 +541,7 @@ $stream
                "162.254.192.0/18", "185.25.182.0/23", "185.86.148.0/22", "192.69.96.0/22",
                "198.52.192.0/22", "199.59.148.0/22", "205.196.6.0/23", "208.64.200.0/22"] },
       { "type": "field", "outboundTag": "direct",
-        "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple", "domain:tpass.me"] },
+        "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple"] },
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
       { "type": "field", "outboundTag": "block", "domain": ["domain:rutracker.org"], "network": "udp", "port": "443" },
@@ -604,8 +604,19 @@ feature_core_install() {
   log_info "Загружаю скрипты..."
   rscp "$SCRIPT_DIR/xray-tproxy-setup.sh" "/usr/local/bin/xray-tproxy-setup.sh"
   rscp "$SCRIPT_DIR/xray-geo-update.sh" "/usr/local/bin/xray-geo-update.sh"
+  rscp "$SCRIPT_DIR/xray-add-direct" "/usr/local/bin/xray-add-direct"
+  rscp "$SCRIPT_DIR/xray-remove-direct" "/usr/local/bin/xray-remove-direct"
   rscp "$SCRIPT_DIR/xray-init" "/etc/init.d/xray"
-  rssh "chmod +x /usr/local/bin/xray-tproxy-setup.sh /usr/local/bin/xray-geo-update.sh /etc/init.d/xray"
+  rssh "chmod +x /usr/local/bin/xray-tproxy-setup.sh /usr/local/bin/xray-geo-update.sh /usr/local/bin/xray-add-direct /usr/local/bin/xray-remove-direct /etc/init.d/xray"
+
+  # 5a. Upload config template + custom-direct list (list only if not present)
+  log_info "Загружаю шаблон конфига и custom-direct список..."
+  rscp "$SCRIPT_DIR/config.json.template" "/usr/local/etc/xray/config.json.template"
+  if rssh_q "test -f /usr/local/etc/xray/custom-direct.list && echo exists" | grep -q exists; then
+    log_info "custom-direct.list уже есть на роутере — не перетираю"
+  else
+    rscp "$SCRIPT_DIR/custom-direct.list" "/usr/local/etc/xray/custom-direct.list"
+  fi
 
   # 6. Hotplug
   log_info "Устанавливаю hotplug..."
@@ -646,6 +657,11 @@ chmod +x /etc/hotplug.d/iface/99-xray-tproxy'
     sleep 4
     /etc/init.d/xray status
   "
+
+  # 10. Regenerate config from template + custom-direct.list (injects seed domains)
+  log_info "Применяю custom-direct список к конфигу..."
+  rssh "/usr/local/bin/xray-add-direct 2>&1 | tail -2"
+
   log_ok "[CORE] Установлено"
 }
 
@@ -691,7 +707,7 @@ install_packages_via_bootstrap() {
   rssh "sed -i 's|https://|http://|g' /etc/apk/repositories.d/distfeeds.list
     export http_proxy=http://127.0.0.1:8118
     apk update
-    apk add wget unzip kmod-tun ip-full nftables kmod-nft-tproxy kmod-nft-socket
+    apk add wget unzip kmod-tun ip-full nftables kmod-nft-tproxy kmod-nft-socket jq
     sed -i 's|http://downloads|https://downloads|g' /etc/apk/repositories.d/distfeeds.list
     echo PACKAGES_OK"
 }
@@ -969,9 +985,14 @@ update_scripts() {
   rscp "$SCRIPT_DIR/xray-tproxy-setup.sh" "/usr/local/bin/xray-tproxy-setup.sh"
   rscp "$SCRIPT_DIR/xray-geo-update.sh"   "/usr/local/bin/xray-geo-update.sh"
   rscp "$SCRIPT_DIR/xray-log-truncate.sh" "/usr/local/bin/xray-log-truncate.sh"
+  rscp "$SCRIPT_DIR/xray-add-direct"      "/usr/local/bin/xray-add-direct"
+  rscp "$SCRIPT_DIR/xray-remove-direct"   "/usr/local/bin/xray-remove-direct"
   rscp "$SCRIPT_DIR/xray-init"             "/etc/init.d/xray"
-  rssh "chmod +x /usr/local/bin/xray-*.sh /etc/init.d/xray
-    /etc/init.d/xray restart && sleep 3 && /etc/init.d/xray status"
+  rscp "$SCRIPT_DIR/config.json.template"  "/usr/local/etc/xray/config.json.template"
+  # custom-direct.list — пользовательские данные, не перетираем
+  rssh "chmod +x /usr/local/bin/xray-*.sh /usr/local/bin/xray-add-direct /usr/local/bin/xray-remove-direct /etc/init.d/xray
+    /etc/init.d/xray restart && sleep 3 && /etc/init.d/xray status
+    /usr/local/bin/xray-add-direct 2>&1 | tail -1"
   pause
 }
 
@@ -1000,6 +1021,7 @@ menu_diagnostics() {
     printf '  5) nftables rules\n'
     printf '  6) ip rules + routes\n'
     printf '  7) Полный audit\n'
+    printf '  8) Custom-direct список (cat custom-direct.list)\n'
     printf '  0) Назад\n\n'
     printf '> '
     read -r choice
@@ -1011,6 +1033,7 @@ menu_diagnostics() {
       5) rssh "echo '=== xray_tproxy ==='; nft list table inet xray_tproxy; echo '=== dns_hijack ==='; nft list table inet dns_hijack"; pause ;;
       6) rssh "ip rule show; echo; ip route show table 100"; pause ;;
       7) diag_full_audit ;;
+      8) rssh "echo '=== /usr/local/etc/xray/custom-direct.list ==='; cat /usr/local/etc/xray/custom-direct.list 2>/dev/null || echo '(empty or missing)'"; pause ;;
       0) return ;;
       *) log_warn "Неверный выбор"; sleep 1 ;;
     esac
@@ -1114,6 +1137,7 @@ menu_uninstall() {
   rssh "
     rm -rf /usr/local/bin/xray /usr/local/bin/xray-tproxy-setup.sh \
            /usr/local/bin/xray-geo-update.sh /usr/local/bin/xray-log-truncate.sh \
+           /usr/local/bin/xray-add-direct /usr/local/bin/xray-remove-direct \
            /usr/local/etc/xray /var/log/xray \
            /etc/hotplug.d/iface/99-xray-tproxy
   "

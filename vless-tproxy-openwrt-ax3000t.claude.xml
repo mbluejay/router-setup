@@ -179,7 +179,7 @@
   </step>
 
   <step id="4" name="install-packages">
-    <command>export http_proxy=http://127.0.0.1:8118 &amp;&amp; apk update &amp;&amp; apk add wget unzip kmod-tun ip-full nftables kmod-nft-tproxy kmod-nft-socket</command>
+    <command>export http_proxy=http://127.0.0.1:8118 &amp;&amp; apk update &amp;&amp; apk add wget unzip kmod-tun ip-full nftables kmod-nft-tproxy kmod-nft-socket jq</command>
     <post>sed -i 's|http://downloads|https://downloads|g' /etc/apk/repositories.d/distfeeds.list</post>
     <note>apk ставит wget-nossl как зависимость — он не умеет HTTPS. Именно поэтому репо переключены на HTTP на время apk add.</note>
   </step>
@@ -212,6 +212,14 @@
     <substep id="5g" name="log-truncate.sh">
       scp -O xray-log-truncate.sh на /usr/local/bin/xray-log-truncate.sh; chmod +x
       Обрезает access.log если &gt; 10 МБ (оставляет последние 2000 строк). Использует wc -c (stat отсутствует в busybox).
+    </substep>
+    <substep id="5g2" name="custom-direct-infrastructure">
+      scp -O config.json.template на /usr/local/etc/xray/config.json.template (источник истины базового конфига)
+      scp -O custom-direct.list на /usr/local/etc/xray/custom-direct.list (ТОЛЬКО если файла ещё нет — пользовательские данные)
+      scp -O xray-add-direct на /usr/local/bin/xray-add-direct; chmod +x
+      scp -O xray-remove-direct на /usr/local/bin/xray-remove-direct; chmod +x
+      После старта xray (шаг 5j): вызвать /usr/local/bin/xray-add-direct (без аргумента) для регенерации config.json из шаблона + списка.
+      Механизм: при xray-add-direct &lt;domain&gt; домен добавляется в custom-direct.list (дедуп, сортировка), потом jq инъектирует "domain:X" в dns.servers[] Yandex (77.88.8.8/8.1) и в routing-rule с маркером geosite:whitelist. Конфиг валидируется через xray run -test до mv.
     </substep>
     <substep id="5h" name="hotplug">
       Создать /etc/hotplug.d/iface/99-xray-tproxy — восстанавливает ip rule/route на ifup.
@@ -397,6 +405,17 @@
     </solution>
     <note>Имя WiFi-интерфейса на AX3000T — phy1-ap0, не wlan1. Проверить через: iw dev | grep Interface</note>
   </pitfall>
+  <pitfall id="16" name="vpn-detection-by-outbound-ip">
+    <symptom>Сайт (типично платёжный — СБП-кассы, pally.info и т.п.) пишет «выключите VPN», хотя DNS у домена валидный</symptom>
+    <cause>Сайт делает fingerprint-запрос к стороннему API (пример: pally.info → veryfy.ai), тот видит outbound IP нашего VLESS-сервера (не-РФ) и возвращает JSON с этим IP или просто блокирует</cause>
+    <solution>
+      Добавить в custom-direct И сам сайт, И fingerprint-API:
+      /usr/local/bin/xray-add-direct pally.info
+      /usr/local/bin/xray-add-direct veryfy.ai
+      Проверка в DevTools: открыть сайт, найти XHR к стороннему домену — его тоже в direct.
+    </solution>
+    <caveat>geoip:ru не поможет — fingerprint-API часто на IP вне РФ (AWS/CF и пр.), но нам нужно чтобы НАШ запрос к нему шёл без VPN, тогда API увидит российский IP клиента</caveat>
+  </pitfall>
   <pitfall id="15" name="ipv6-tproxy-bypass">
     <symptom>Часть трафика обходит xray; ipv6-test.com показывает реальный IP провайдера</symptom>
     <cause>TProxy перехватывает только IPv4. Если провайдер выдаёт WAN IPv6 и odhcpd транслирует префикс на LAN — клиенты получают глобальный IPv6 и ходят мимо xray</cause>
@@ -427,6 +446,15 @@
   <command name="force-log-truncate">
     /usr/local/bin/xray-log-truncate.sh
   </command>
+  <command name="add-custom-direct-domain" when="сайт детектит VPN по outbound IP, нужно в direct">
+    /usr/local/bin/xray-add-direct &lt;domain&gt;
+  </command>
+  <command name="remove-custom-direct-domain">
+    /usr/local/bin/xray-remove-direct &lt;domain&gt;
+  </command>
+  <command name="regenerate-config-from-template-and-list" when="после ручной правки custom-direct.list">
+    /usr/local/bin/xray-add-direct    (без аргумента)
+  </command>
 </recovery_commands>
 
 <file_locations>
@@ -434,7 +462,11 @@
   <file path="/usr/local/bin/xray-tproxy-setup.sh">nftables + ip rules</file>
   <file path="/usr/local/bin/xray-geo-update.sh">Обновление geo-баз</file>
   <file path="/usr/local/bin/xray-log-truncate.sh">Обрезка access.log</file>
-  <file path="/usr/local/etc/xray/config.json">Конфиг xray</file>
+  <file path="/usr/local/bin/xray-add-direct">CLI: добавить домен в custom-direct список (direct outbound)</file>
+  <file path="/usr/local/bin/xray-remove-direct">CLI: удалить домен из custom-direct списка</file>
+  <file path="/usr/local/etc/xray/config.json">Активный конфиг xray (регенерируется из шаблона + списка)</file>
+  <file path="/usr/local/etc/xray/config.json.template">Шаблон базового конфига (источник истины)</file>
+  <file path="/usr/local/etc/xray/custom-direct.list">Список кастомных direct-доменов (plain text, по одному на строку)</file>
   <file path="/usr/local/etc/xray/geoip.dat">База IP (v2fly)</file>
   <file path="/usr/local/etc/xray/geosite.dat">База доменов (roscomvpn-geosite)</file>
   <file path="/etc/init.d/xray">procd сервис</file>
