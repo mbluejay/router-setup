@@ -24,8 +24,7 @@
           "geosite:whitelist",
           "geosite:steam",
           "geosite:microsoft",
-          "geosite:apple",
-          "domain:tpass.me"
+          "geosite:apple"
         ]
       },
       {
@@ -35,8 +34,7 @@
           "geosite:whitelist",
           "geosite:steam",
           "geosite:microsoft",
-          "geosite:apple",
-          "domain:tpass.me"
+          "geosite:apple"
         ]
       },
       "8.8.8.8"
@@ -157,8 +155,7 @@
           "geosite:category-ru",
           "geosite:steam",
           "geosite:microsoft",
-          "geosite:apple",
-          "domain:tpass.me"
+          "geosite:apple"
         ]
       },
       {

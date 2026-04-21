@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+LIST=/usr/local/etc/xray/custom-direct.list
+
+usage() {
+    echo "usage: xray-remove-direct <domain>" >&2
+    exit 1
+}
+
+[ $# -ge 1 ] || usage
+DOMAIN="$1"
+
+case "$DOMAIN" in
+    ''|*[!a-z0-9.-]*|-*|*-|.*|*.) usage ;;
+esac
+case "$DOMAIN" in
+    *.*) ;;
+    *) usage ;;
+esac
+
+touch "$LIST"
+
+if ! grep -qxF "$DOMAIN" "$LIST"; then
+    echo "not in list: $DOMAIN"
+    exit 0
+fi
+
+ESC=$(echo "$DOMAIN" | sed 's/\./\\./g')
+sed -i "/^${ESC}$/d" "$LIST"
+
+exec /usr/local/bin/xray-add-direct

@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+LIST=/usr/local/etc/xray/custom-direct.list
+TPL=/usr/local/etc/xray/config.json.template
+CFG=/usr/local/etc/xray/config.json
+
+usage() {
+    echo "usage: xray-add-direct [<domain>]    (no arg = regenerate from current list)" >&2
+    exit 1
+}
+
+[ -f "$TPL" ] || { echo "template not found: $TPL" >&2; exit 3; }
+touch "$LIST"
+
+if [ $# -ge 1 ]; then
+    DOMAIN="$1"
+    case "$DOMAIN" in
+        ''|*[!a-z0-9.-]*|-*|*-|.*|*.) usage ;;
+    esac
+    case "$DOMAIN" in
+        *.*) ;;
+        *) usage ;;
+    esac
+    if ! grep -qxF "$DOMAIN" "$LIST"; then
+        echo "$DOMAIN" >> "$LIST"
+    fi
+    sort -u "$LIST" > "${LIST}.tmp" && mv "${LIST}.tmp" "$LIST"
+else
+    DOMAIN=""
+fi
+
+DOMS=$(jq -R -s -c 'split("\n") | map(select(length>0)) | map("domain:"+.)' < "$LIST")
+
+jq --argjson doms "$DOMS" '
+  .dns.servers |= map(
+    if (type == "object" and (.address == "77.88.8.8" or .address == "77.88.8.1"))
+    then .domains = ((.domains // []) + $doms | unique)
+    else .
+    end
+  )
+  |
+  .routing.rules |= map(
+    if (.outboundTag == "direct" and ((.domain // []) | index("geosite:whitelist")))
+    then .domain = ((.domain // []) + $doms | unique)
+    else .
+    end
+  )
+' "$TPL" > "${CFG}.new.json"
+
+if ! XRAY_LOCATION_ASSET=/usr/local/etc/xray /usr/local/bin/xray run -test -c "${CFG}.new.json" > /tmp/xray-test.log 2>&1; then
+    echo "config test failed:" >&2
+    cat /tmp/xray-test.log >&2
+    rm -f "${CFG}.new.json"
+    exit 2
+fi
+
+mv "${CFG}.new.json" "$CFG"
+/etc/init.d/xray restart
+sleep 3
+/etc/init.d/xray status
+
+TOTAL=$(wc -l < "$LIST" | tr -d ' ')
+if [ -n "$DOMAIN" ]; then
+    echo "added: $DOMAIN (total: $TOTAL)"
+else
+    echo "regenerated from list (total: $TOTAL)"
+fi
