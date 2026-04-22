@@ -27,7 +27,7 @@
 | `geosite:whitelist`, `category-ru`, `steam`, `microsoft`, `apple` | direct |
 | Порты 6881–6889 (BitTorrent) | direct |
 | UDP 500/1701/4500 (L2TP/IPsec) | direct |
-| UDP 443 к `rutracker.org` (QUIC) | block — браузер деградирует на TCP |
+| UDP 443 к `rutracker.org`, `claude.ai`, `claude.com`, `anthropic.com` (QUIC) | block — браузер деградирует на TCP |
 | Всё остальное | proxy (VLESS) |
 
 ## Требования
@@ -105,7 +105,7 @@ routing rules (geoip/geosite/port):
     ru / private / Valve IPs   → freedom (mark=255, bypasses TProxy)
     whitelist / steam / ms / apple (по sniffing) → freedom
     6881-6889 / UDP 500-4500   → freedom
-    rutracker + udp 443        → blackhole (QUIC block)
+    rutracker/claude + udp 443 → blackhole (QUIC block)
     остальное                  → VLESS (mark=255)
     ↓
 WAN interface → internet
@@ -270,7 +270,7 @@ dropbear SSH на OpenWrt не поддерживает SFTP. Всегда: `scp
 6. direct: geosite:whitelist, category-ru, steam, microsoft, apple
 7. direct: ports 6881-6889
 8. direct: udp 500,1701,4500
-9. block:  rutracker.org udp 443
+9. block:  rutracker.org / claude.ai / claude.com / anthropic.com udp 443
 10. proxy: tcp,udp (catch-all)
 ```
 
@@ -297,11 +297,14 @@ dropbear SSH на OpenWrt не поддерживает SFTP. Всегда: `scp
 - `strictorder=1` в dnsmasq (сначала xray, fallback только при молчании)
 - Проблемные домены → в DoH-список
 
-### 11. QUIC через VLESS ненадёжен для агрессивных CF-сайтов
+### 11. QUIC через VLESS ненадёжен для агрессивных CF-сайтов и long SSE-стримов
 
-rutracker.org и другие сайты с Turnstile/WAF через QUIC (UDP:443) уходят в бесконечную загрузку → Connection timeout. VLESS Reality оптимизирован под TCP, QUIC через такой тоннель работает нестабильно.
+Два разных симптома, одна причина — VLESS Reality оптимизирован под TCP, UDP/QUIC через такой тоннель нестабилен:
 
-**Решение**: в routing rules block для `domain:rutracker.org + network:udp + port:443`. Браузер не получает ответ QUIC, деградирует на TCP/HTTP2, работает стабильно.
+- **rutracker.org** и другие сайты с Turnstile/WAF через QUIC (UDP:443) уходят в бесконечную загрузку → Connection timeout.
+- **claude.ai / claude.com / api.anthropic.com** — длинные tool-result SSE-стримы срываются: `Tool result could not be submitted. The request may have expired or the connection was interrupted.` Браузер упорно тащит HTTP/3 (QUIC), который рвётся на дистанции.
+
+**Решение**: в routing rules block для `domain:rutracker.org, domain:claude.ai, domain:claude.com, domain:anthropic.com + network:udp + port:443`. Браузер не получает ответ QUIC, деградирует на TCP/HTTP2, работает стабильно.
 
 **Caveat**: xray не всегда успевает извлечь SNI из первого QUIC Initial-пакета — в access.log `-> block` записи могут не появляться, но страховка работает.
 

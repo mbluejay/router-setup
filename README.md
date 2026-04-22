@@ -65,7 +65,7 @@ xray:     not installed
  [x] 4) DNS hijack (Xbox/PS5 fix)
  [x] 5) Log rotation
  [x] 6) Cloudflare DoH для x.com/twitter/themoviedb/...
- [x] 7) QUIC block rutracker.org
+ [x] 7) QUIC block rutracker.org + claude.ai
 ```
 
 **Update** — меняет VLESS-ссылку, обновляет geo-базы, переливает свежие версии скриптов. Идемпотентно — не трогает то что уже актуально.
