@@ -172,7 +172,12 @@
       {
         "type": "field",
         "outboundTag": "block",
-        "domain": ["domain:rutracker.org"],
+        "domain": [
+          "domain:rutracker.org",
+          "domain:claude.ai",
+          "domain:claude.com",
+          "domain:anthropic.com"
+        ],
         "network": "udp",
         "port": "443"
       },

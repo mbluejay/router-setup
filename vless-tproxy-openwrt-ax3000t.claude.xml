@@ -351,7 +351,7 @@
       3) direct: geoip:private, geoip:ru, Valve IPs
       4) direct: geosite:whitelist/category-ru/steam/ms/apple
       5) direct: port 6881-6889, udp 500/1701/4500
-      6) block: rutracker domain + udp 443 (QUIC)
+      6) block: rutracker/claude/anthropic domains + udp 443 (QUIC)
       7) proxy: catch-all (последним)
     </rule>
   </pitfall>
@@ -379,9 +379,9 @@
     </solution>
   </pitfall>
   <pitfall id="11" name="quic-via-vless-unreliable">
-    <symptom>rutracker.org / сайты с агрессивным CF WAF — бесконечная загрузка + CF timeout</symptom>
-    <cause>VLESS Reality оптимизирован под TCP, QUIC (UDP:443) через такой тоннель нестабилен на некоторых CF edge</cause>
-    <solution>routing rule: block для domain:rutracker.org + network:udp + port:443. Браузер деградирует на TCP/HTTP2</solution>
+    <symptom>1) rutracker.org / сайты с агрессивным CF WAF — бесконечная загрузка + CF timeout. 2) claude.ai / api.anthropic.com — tool-result SSE-стримы срываются с ошибкой "Tool result could not be submitted. The request may have expired or the connection was interrupted"</symptom>
+    <cause>VLESS Reality оптимизирован под TCP, QUIC (UDP:443) через такой тоннель нестабилен — что на агрессивных CF edge, что на длинных SSE-стримах</cause>
+    <solution>routing rule: block для domain:rutracker.org, domain:claude.ai, domain:claude.com, domain:anthropic.com + network:udp + port:443. Браузер деградирует на TCP/HTTP2</solution>
     <caveat>xray не всегда успевает извлечь SNI из QUIC Initial — в access.log -&gt; block может не появляться, но страховка работает</caveat>
   </pitfall>
   <pitfall id="12" name="ipv6-happy-eyeballs-delay">

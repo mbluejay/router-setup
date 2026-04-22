@@ -544,7 +544,7 @@ $stream
         "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple"] },
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
-      { "type": "field", "outboundTag": "block", "domain": ["domain:rutracker.org"], "network": "udp", "port": "443" },
+      { "type": "field", "outboundTag": "block", "domain": ["domain:rutracker.org", "domain:claude.ai", "domain:claude.com", "domain:anthropic.com"], "network": "udp", "port": "443" },
       { "type": "field", "outboundTag": "proxy", "network": "tcp,udp" }
     ]
   }
@@ -776,9 +776,9 @@ feature_doh_install() {
   log_ok "[DOH-CF] Активно (часть конфига)"
 }
 
-# Feature: QUIC block for rutracker (included in config.json.template)
+# Feature: QUIC block for rutracker + claude.ai (included in config.json.template)
 feature_quic_block_install() {
-  log_step "[QUIC-BLOCK] QUIC-блок для rutracker — уже в config.json"
+  log_step "[QUIC-BLOCK] QUIC-блок для rutracker + claude — уже в config.json"
   log_ok "[QUIC-BLOCK] Активно (часть конфига)"
 }
 
@@ -872,7 +872,7 @@ menu_custom_install() {
     render_feature dnshj "DNS hijack (Xbox/PS5 fix)" 4
     render_feature log   "Log rotation" 5
     render_feature doh   "Cloudflare DoH for x.com/twitter/themoviedb" 6
-    render_feature quic  "QUIC block rutracker.org" 7
+    render_feature quic  "QUIC block rutracker.org + claude.ai" 7
     printf '    c) WiFi канал: %-6s  [auto | 36 | 100 | 149]\n' "$WIFI_CHANNEL"
     printf '\n  9) Продолжить к установке\n'
     printf '  0) Назад\n\n'
