@@ -1,0 +1,52 @@
+#!/bin/sh
+# xray-quic-toggle — блокировка QUIC (UDP:443) для предотвращения HSTS-порчи
+# Использование: xray-quic-toggle [on|off|status]
+
+TPL=/usr/local/etc/xray/config.json.template
+
+is_blocked() {
+    jq -e '.routing.rules[] | select(.network == "udp" and .port == "443" and .outboundTag == "block" and (has("domain") | not))' "$TPL" > /dev/null 2>&1
+}
+
+status() {
+    if is_blocked; then
+        echo "QUIC: blocked (UDP:443 → drop)"
+    else
+        echo "QUIC: allowed"
+    fi
+}
+
+block_quic() {
+    if is_blocked; then
+        echo "Already blocked"
+        exit 0
+    fi
+    RULE='{"type":"field","outboundTag":"block","network":"udp","port":"443"}'
+    jq --argjson rule "$RULE" '
+        .routing.rules = (.routing.rules[:-1] + [$rule] + [.routing.rules[-1]])
+    ' "$TPL" > "${TPL}.tmp" && mv "${TPL}.tmp" "$TPL"
+    /usr/local/bin/xray-add-direct
+    echo "QUIC blocked"
+}
+
+allow_quic() {
+    if ! is_blocked; then
+        echo "Already allowed"
+        exit 0
+    fi
+    jq '
+        .routing.rules |= map(select(
+            (.network == "udp" and .port == "443" and
+             .outboundTag == "block" and (has("domain") | not)) | not
+        ))
+    ' "$TPL" > "${TPL}.tmp" && mv "${TPL}.tmp" "$TPL"
+    /usr/local/bin/xray-add-direct
+    echo "QUIC allowed"
+}
+
+case "${1:-status}" in
+    on)     block_quic ;;
+    off)    allow_quic ;;
+    status) status ;;
+    *)      echo "usage: xray-quic-toggle [on|off|status]" >&2; exit 1 ;;
+esac
