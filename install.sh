@@ -544,8 +544,8 @@ $stream
         "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple"] },
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
-      { "type": "field", "outboundTag": "block", "domain": ["domain:rutracker.org", "domain:claude.ai", "domain:claude.com", "domain:anthropic.com"], "network": "udp", "port": "443" },
-      { "type": "field", "outboundTag": "proxy", "network": "tcp,udp" }
+      { "type": "field", "outboundTag": "block",  "network": "udp", "port": "443" },
+      { "type": "field", "outboundTag": "proxy",  "network": "tcp,udp" }
     ]
   }
 }

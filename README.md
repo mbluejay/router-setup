@@ -65,10 +65,18 @@ xray:     not installed
  [x] 4) DNS hijack (Xbox/PS5 fix)
  [x] 5) Log rotation
  [x] 6) Cloudflare DoH для x.com/twitter/themoviedb/...
- [x] 7) QUIC block rutracker.org + claude.ai
+ [x] 7) QUIC block (UDP:443 → drop, глобальный)
 ```
 
 **Update** — меняет VLESS-ссылку, обновляет geo-базы, переливает свежие версии скриптов. Идемпотентно — не трогает то что уже актуально.
+
+Если нужно поменять только VLESS-ссылку без полного переустановщика — есть `update-vless.sh`:
+
+```
+./update-vless.sh
+```
+
+Спросит IP роутера и новую VLESS-ссылку, распарсит, покажет параметры, зальёт конфиг и применит.
 
 **Diagnostics** — статус xray, тест конфига, live access.log, DNS-проверки, полный audit.
 
@@ -100,6 +108,8 @@ WiFi и LAN IP по умолчанию не трогает (они меняют 
 | `xray-add-direct` | CLI на роутере: добавить домен в белый список (direct) |
 | `xray-remove-direct` | CLI на роутере: удалить домен из белого списка |
 | `custom-direct.list` | Seed-список кастомных direct-доменов (`tpass.me` как пример) |
+| `update-vless.sh` | Замена VLESS-ссылки без полной переустановки |
+| `xray-quic-toggle` | Включить/выключить глобальный QUIC-блок (UDP:443) на роутере |
 | `add-direct.sh` / `add-direct.ps1` | Клиентские обёртки — одна команда с ноутбука |
 | `remove-direct.sh` / `remove-direct.ps1` | Симметрично, удаление |
 | `bin/xray` | Бинарник xray для OpenWrt arm64 |
