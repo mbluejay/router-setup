@@ -828,6 +828,45 @@ feature_quic_block_install() {
   log_ok "[QUIC-BLOCK] Активно (часть конфига)"
 }
 
+# Feature: zram-swap — compressed RAM swap для запаса памяти на роутере
+feature_zram_install() {
+  log_step "[ZRAM] Compressed RAM swap (lzo-rle, 128M)"
+
+  if rssh_q "grep -q zram /proc/modules && echo loaded" | grep -q loaded; then
+    log_info "zram уже загружен на роутере"
+  else
+    log_info "kmod-zram не установлен — проверяю наличие .apk файлов в bin/..."
+    local need_files="kmod-crypto-acompress kmod-lib-lzo kmod-zram"
+    local missing=""
+    for f in $need_files; do
+      ls "$SCRIPT_DIR/bin/${f}"*.apk >/dev/null 2>&1 || missing="$missing $f"
+    done
+
+    if [ -n "$missing" ]; then
+      log_err "Не найдены пакеты в bin/:$missing"
+      log_err "Скачай их с https://downloads.openwrt.org/releases/<VER>/targets/mediatek/filogic/kmods/<HASH>/"
+      log_err "  (<HASH> в /etc/apk/repositories.d/distfeeds.list на роутере)"
+      log_err "Положи .apk в $SCRIPT_DIR/bin/ и запусти заново."
+      return 1
+    fi
+
+    log_info "Заливаю пакеты на роутер..."
+    for f in $need_files; do
+      rscp "$(ls $SCRIPT_DIR/bin/${f}*.apk | head -1)" "/tmp/${f}.apk"
+    done
+
+    log_info "Установка..."
+    rssh "apk add --no-network --allow-untrusted /tmp/kmod-crypto-acompress.apk /tmp/kmod-lib-lzo.apk /tmp/kmod-zram.apk 2>&1 | tail -5
+rm -f /tmp/kmod-*.apk"
+  fi
+
+  log_info "Заливаю init.d/zram-swap..."
+  rscp "$SCRIPT_DIR/zram-swap-init" "/etc/init.d/zram-swap"
+  rssh "chmod +x /etc/init.d/zram-swap && /etc/init.d/zram-swap enable && /etc/init.d/zram-swap start && sleep 2 && cat /proc/swaps"
+
+  log_ok "[ZRAM] Активирован (~128MB compressed swap)"
+}
+
 # Feature: Telegram watchdog — alerts on balancer switches / VPN death
 feature_tg_watchdog_install() {
   log_step "[TG-WATCHDOG] Установка Telegram-уведомлений"
@@ -1010,6 +1049,7 @@ menu_full_install() {
   fi
 
   create_snapshot
+  feature_zram_install          || log_warn "zram-swap failed (не критично, продолжаем)"
   feature_core_install          || { log_err "Core install failed"; pause; return; }
   feature_log_truncate_install  || log_warn "Log rotate failed (не критично)"
   feature_dns_hijack_install    || log_warn "DNS hijack failed"
@@ -1029,7 +1069,7 @@ menu_full_install() {
 
 # Feature toggle state
 declare -A FEATURE_ENABLED=(
-  [core]=1 [log]=1 [dnshj]=1 [doh]=1 [quic]=1 [wifi]=1 [ipv6]=1 [tg]=0
+  [core]=1 [log]=1 [dnshj]=1 [doh]=1 [quic]=1 [wifi]=1 [ipv6]=1 [tg]=0 [zram]=1
 )
 
 render_feature() {
@@ -1053,6 +1093,7 @@ menu_custom_install() {
     render_feature doh   "Cloudflare DoH for x.com/twitter/themoviedb" 6
     render_feature quic  "QUIC block rutracker.org + claude.ai" 7
     render_feature tg    "Telegram watchdog (уведомления о fallback)" 8
+    render_feature zram  "zram-swap (compressed RAM ~128M)" z
     printf '    c) WiFi канал: %-6s  [auto | 36 | 100 | 149]\n' "$WIFI_CHANNEL"
     printf '\n  9) Продолжить к установке\n'
     printf '  0) Назад\n\n'
@@ -1067,6 +1108,7 @@ menu_custom_install() {
       6) toggle_feature doh ;;
       7) toggle_feature quic ;;
       8) toggle_feature tg ;;
+      z|Z) toggle_feature zram ;;
       c|C)
         case "$WIFI_CHANNEL" in
           auto) WIFI_CHANNEL=36 ;;
@@ -1090,6 +1132,7 @@ menu_custom_install() {
   fi
 
   create_snapshot
+  [ "${FEATURE_ENABLED[zram]}"  = 1 ] && feature_zram_install || log_warn "Skipped zram"
   feature_core_install || { log_err "Core failed"; pause; return; }
   [ "${FEATURE_ENABLED[log]}"   = 1 ] && feature_log_truncate_install
   [ "${FEATURE_ENABLED[dnshj]}" = 1 ] && feature_dns_hijack_install

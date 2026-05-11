@@ -34,6 +34,8 @@
 - **IPv6 отключён** — нет Happy Eyeballs-задержек и IPv6-утечек
 - Авто-обновление geo-баз раз в неделю, ротация логов ежечасно
 - **(опционально) TG-watchdog**: бот в Telegram отчитывается о переключениях balancer'а и полном отвале VPN. См. EXTRA_CARE.md
+- **(опционально) zram-swap**: 128MB сжатого swap в RAM (lzo-rle ~2x) — запас памяти на роутере с 256MB total. Защищает от OOM-kill xray при пиковом расходе.
+- **OOM-protection**: xray получает `oom_score_adj=-500` через init.d — при OOM убивается последним, не первым.
 
 Подробности — в [vless-tproxy-openwrt-ax3000t.md](vless-tproxy-openwrt-ax3000t.md).
 
@@ -68,6 +70,8 @@ xray:     not installed
  [x] 5) Log rotation
  [x] 6) Cloudflare DoH для x.com/twitter/themoviedb/...
  [x] 7) QUIC block (UDP:443 → drop, глобальный)
+ [ ] 8) Telegram watchdog (нужны TG_TOKEN и chat_id)
+ [x] z) zram-swap (compressed RAM ~128M)
 ```
 
 **Update** — меняет VLESS-ссылку, обновляет geo-базы, переливает свежие версии скриптов. Идемпотентно — не трогает то что уже актуально.
@@ -105,8 +109,11 @@ WiFi и LAN IP по умолчанию не трогает (они меняют 
 | `EXTRA_CARE.md` | Архитектура multi-layer fallback, что фактически сделано, что осталось |
 | `config.json.template` | Шаблон конфига xray v2 (3 outbound + observatory + balancer) |
 | `proxy-only.json.template` | Шаблон временного HTTP proxy для bootstrap |
-| `xray-init` | init.d сервис procd |
+| `xray-init` | init.d сервис procd + OOM-protection (`oom_score_adj=-500`) |
 | `xray-tproxy-setup.sh` | nftables TProxy + ip rules + DNS hijack |
+| `zram-swap-init` | init.d zram-swap (128M lzo-rle compressed RAM) |
+| `xray-tg-watchdog.sh` | TG-уведомления при смене balancer'а (rate-limit 5 мин) |
+| `xray-tg-daily-summary.sh` | TG-отчёт раз в день в 23:59 |
 | `xray-geo-update.sh` | Обновление geo-баз (cron еженедельно) |
 | `xray-log-truncate.sh` | Обрезка access.log (cron ежечасно) |
 | `xray-add-direct` | CLI на роутере: добавить домен в белый список (direct) |
@@ -129,6 +136,10 @@ WiFi и LAN IP по умолчанию не трогает (они меняют 
 
 - xray автостарт при загрузке (init.d, START=99)
 - При краше — автоперезапуск через procd
+- **OOM-protection**: xray `oom_score_adj=-500` — убивается последним
+- **zram-swap** START=10 — активен раньше xray, даёт +60-70MB compressed memory
+- **Multi-layer fallback**: при отвале одного outbound balancer мгновенно выбирает живой (см. EXTRA_CARE.md)
+- **TG-watchdog**: rate-limit 5 мин на шумные переходы, мгновенно на критичные
 - ip rules восстанавливаются через hotplug при перезапуске сети
 - `/var/log/xray/` пересоздаётся при каждом старте (tmpfs)
 - DNS работает даже если xray ещё не поднялся — fallback на Yandex DNS

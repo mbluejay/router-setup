@@ -1,0 +1,49 @@
+#!/bin/sh /etc/rc.common
+#
+# zram-swap — compressed RAM swap. Даёт ~50-70MB эффективной памяти
+# на роутере с 256MB total за счёт сжатия (lzo-rle ~2x).
+#
+# START=10 — раньше большинства сервисов, чтобы xray уже стартовал с активным
+# swap'ом и мог сбрасывать туда холодные страницы при пике.
+
+START=10
+STOP=99
+
+ZRAM_SIZE="${ZRAM_SIZE:-128M}"
+ZRAM_ALGO="${ZRAM_ALGO:-lzo-rle}"
+ZRAM_PRIO="${ZRAM_PRIO:-100}"
+
+start() {
+    if ! grep -q zram /proc/modules; then
+        modprobe zram num_devices=1 || {
+            echo "zram-swap: modprobe zram failed" >&2
+            return 1
+        }
+    fi
+    [ -e /sys/block/zram0/disksize ] || {
+        echo "zram-swap: /sys/block/zram0 not present" >&2
+        return 1
+    }
+    if grep -q "^/dev/zram0" /proc/swaps; then
+        return 0
+    fi
+    echo "$ZRAM_ALGO" > /sys/block/zram0/comp_algorithm 2>/dev/null
+    echo "$ZRAM_SIZE" > /sys/block/zram0/disksize
+    mkswap /dev/zram0 >/dev/null
+    swapon /dev/zram0 -p "$ZRAM_PRIO"
+}
+
+stop() {
+    if grep -q "^/dev/zram0" /proc/swaps; then
+        swapoff /dev/zram0 2>/dev/null
+    fi
+    if [ -e /sys/block/zram0/reset ]; then
+        echo 1 > /sys/block/zram0/reset 2>/dev/null
+    fi
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
