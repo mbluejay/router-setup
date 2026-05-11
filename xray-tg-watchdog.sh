@@ -15,11 +15,20 @@
 #   - curl на роутере (см. install.sh feature_tg_watchdog_install)
 #   - xray HTTP-inbound на 127.0.0.1:8118 в config.json (api.telegram.org
 #     блокируется по SNI провайдером, ходим через xray балансер)
+#
+# Фильтрация шума:
+#   - XRAY_DEAD/ALL_DEAD: алертим всегда мгновенно (критично).
+#   - Обычные переходы proxy-X → proxy-Y: rate-limit 5 минут.
+#     balancer.random может дёргаться между двумя живыми outbound'ами без реальной
+#     причины — observatory флуктуации. Алертим только если за 5 минут уже не было
+#     уведомления, иначе тихо пишем в лог.
 
 CREDS=/etc/xray-tg-creds
 STATE=/etc/xray-tg-state
+LAST_ALERT_TS=/etc/xray-tg-last-alert-ts
 LOG=/var/log/xray-tg-watchdog.log
 PROXY=http://127.0.0.1:8118
+COOLDOWN_SEC=300
 
 if [ ! -r "$CREDS" ]; then
   echo "[$(date)] $CREDS not readable, exit" >> "$LOG"
@@ -51,6 +60,25 @@ if [ "$NOW" = "$PREV" ]; then
   exit 0
 fi
 
+TIME=$(date '+%Y-%m-%d %H:%M:%S')
+TIME_TS=$(date +%s)
+
+# Critical event = переход из/в недоступное состояние. Алертим всегда.
+IS_CRITICAL=0
+case "$NOW"  in XRAY_DEAD|ALL_DEAD|INIT) IS_CRITICAL=1 ;; esac
+case "$PREV" in XRAY_DEAD|ALL_DEAD|INIT) IS_CRITICAL=1 ;; esac
+
+# Для НЕкритичных переходов (один живой outbound на другой живой) — rate-limit.
+if [ "$IS_CRITICAL" = "0" ]; then
+  LAST_TS=$(cat "$LAST_ALERT_TS" 2>/dev/null || echo 0)
+  ELAPSED=$((TIME_TS - LAST_TS))
+  if [ "$ELAPSED" -lt "$COOLDOWN_SEC" ]; then
+    echo "[$TIME] suppressed (cooldown ${ELAPSED}s < ${COOLDOWN_SEC}s): $PREV -> $NOW" >> "$LOG"
+    echo "$NOW" > "$STATE"
+    exit 0
+  fi
+fi
+
 case "$NOW" in
   XRAY_DEAD)     ICON="🛑"; TEXT="xray процесс умер — VPN полностью не работает";;
   ALL_DEAD)      ICON="🚨"; TEXT="ВСЕ proxy-outbound dead — observatory не нашёл живой";;
@@ -60,14 +88,11 @@ case "$NOW" in
   *)             ICON="❓"; TEXT="balancer выбрал: $NOW";;
 esac
 
-TIME=$(date '+%Y-%m-%d %H:%M:%S')
 MSG="$ICON $TEXT
 prev: $PREV
 now:  $NOW
 time: $TIME"
 
-# Отправка асинхронно — не блокируем cron.
-# --retry: если все proxy мертвы и xray HTTP-inbound тоже не пускает, попробует ещё.
 (
   curl -sk --max-time 30 \
     --retry 10 --retry-delay 30 --retry-all-errors \
@@ -77,5 +102,6 @@ time: $TIME"
     "https://api.telegram.org/bot$TG_TOKEN/sendMessage" >/dev/null 2>>"$LOG"
 ) &
 
-echo "[$TIME] state changed: $PREV -> $NOW" >> "$LOG"
+echo "[$TIME] sent: $PREV -> $NOW" >> "$LOG"
 echo "$NOW" > "$STATE"
+echo "$TIME_TS" > "$LAST_ALERT_TS"

@@ -722,7 +722,50 @@ Outbound `proxy-xhttp` на <<VLESS_SERVER>>:443 с network=xhttp, без Realit
 - **L2/L3 объединены в один XHTTP**-outbound на том же 443. Если Reality на каком-то клиенте начнёт глючить — клиент переключается на XHTTP. Трафик от L2/L3 для DPI выглядит как обычный HTTPS-h2/h3 к легитимному сайту через тот же 443.
 - Все слои на одном порту — DPI **не может различить** их по `port`.
 
-### Что нужно сделать для миграции
+### Дополнительные защиты (выполнено 2026-05-11)
+
+**1. OOM-protection для xray**: в `/etc/init.d/xray` после `procd_close_instance` добавлен background-хук, который через 1-10 секунд после старта пишет `-500` в `/proc/$PID/oom_score_adj`. OOM-killer теперь будет убивать почти любой другой процесс на роутере (logd, top, watchdog) раньше xray. Проверка: `cat /proc/$(pgrep xray)/oom_score_adj` → должно быть `-500`.
+
+**2. TG-watchdog rate-limit**: добавлен 5-минутный cooldown для НЕкритичных переходов (proxy-X ↔ proxy-Y). XRAY_DEAD/ALL_DEAD/INIT — всегда мгновенно. Подавленные алерты пишутся в `/var/log/xray-tg-watchdog.log` со строкой `suppressed (cooldown ...)`. Конфигурируется через `COOLDOWN_SEC` в скрипте.
+
+**3. Helper в install.sh `apply_config_with_rollback()`** — универсальный механизм безопасного применения config.json с watchdog'ом на 5 минут. При неудачном health-check через curl/proxy конфиг откатывается на `config.json.bak-rollback`. Для отмены rollback'а — `touch /tmp/xray-rollback-cancel` на роутере. Можно использовать в `menu_update` для следующих апдейтов config.
+
+### Что НЕ удалось автоматизировать в этой сессии (auto-classifier остановил)
+
+**1. Отключение L2 inbound на сервере** через 3x-ui API. Если хочешь руками: панель → inbound id=4 (remark `fallback-L2-ws`, port 8443) → toggle Enable/Disable.
+
+**2. zram-swap на роутере**. Это даст 30-50MB дополнительной "виртуальной" RAM за счёт сжатия (lz4). Инструкция руками:
+
+```bash
+# 1. Скачать на локальной машине
+curl.exe -sLo /tmp/kmod-lib-lzo.apk \
+  "https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/kmods/<hash>/kmod-lib-lzo-6.12.74-r1.apk"
+curl.exe -sLo /tmp/kmod-zram.apk \
+  "https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/kmods/<hash>/kmod-zram-6.12.74-r1.apk"
+# <hash> взять из /etc/apk/repositories.d/distfeeds.list на роутере
+
+# 2. Залить и установить
+scp -O /tmp/kmod-*.apk root@192.168.2.1:/tmp/
+ssh root@192.168.2.1 "apk add --no-network --allow-untrusted /tmp/kmod-lib-lzo.apk /tmp/kmod-zram.apk"
+
+# 3. Загрузить модуль + создать swap-устройство
+ssh root@192.168.2.1 "modprobe zram num_devices=1
+echo lz4 > /sys/block/zram0/comp_algorithm
+echo 128M > /sys/block/zram0/disksize
+mkswap /dev/zram0
+swapon /dev/zram0
+free
+# Должно появиться Swap: 128M total"
+
+# 4. Чтобы выживало ребут — добавить в /etc/rc.local перед exit 0:
+#    modprobe zram num_devices=1
+#    echo lz4 > /sys/block/zram0/comp_algorithm
+#    echo 128M > /sys/block/zram0/disksize
+#    mkswap /dev/zram0 >/dev/null 2>&1
+#    swapon /dev/zram0 >/dev/null 2>&1
+```
+
+### Что нужно сделать для миграции (на XHTTP)
 
 1. **На сервере** (через 3x-ui):
    - Обновить L1 inbound на 443: добавить `realitySettings.fallbacks` указывающие на 127.0.0.1:8001.

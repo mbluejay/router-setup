@@ -883,6 +883,85 @@ chmod 600 /etc/xray-tg-creds"
 }
 
 # ══════════════════════════════════════════════════════════════════════════
+# Helper: apply config with auto-rollback watchdog (5 минут)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Применяет новый xray-config с страховкой: если через 5 минут не работает
+# health-check через VPN — конфиг автоматически откатывается на backup и xray
+# рестартует. Для отмены rollback'а — touch /tmp/xray-rollback-cancel на роутере.
+#
+# Использование:
+#   rscp "$tmp_cfg" "/usr/local/etc/xray/config.json.new"
+#   apply_config_with_rollback || { log_err "Apply failed"; return 1; }
+#
+# Требует на роутере: curl. Если curl нет — функция warning'ит и применяет
+# конфиг без rollback'а.
+
+apply_config_with_rollback() {
+  local backup="/usr/local/etc/xray/config.json.bak-rollback"
+  local new="/usr/local/etc/xray/config.json.new"
+  local cfg="/usr/local/etc/xray/config.json"
+
+  log_info "Test нового конфига..."
+  if ! rssh "XRAY_LOCATION_ASSET=/usr/local/etc/xray /usr/local/bin/xray run -test -format json -c $new 2>&1 | tail -2 | grep -q 'Configuration OK'"; then
+    log_err "Новый конфиг не проходит xray test — применять небезопасно"
+    rssh "rm -f $new"
+    return 1
+  fi
+
+  log_info "Снимок текущего конфига как rollback-backup..."
+  rssh "cp $cfg $backup"
+
+  local has_curl
+  has_curl=$(rssh_q "command -v curl >/dev/null && echo yes")
+
+  if [ "$has_curl" = "yes" ]; then
+    log_info "Запускаю watchdog (5 мин)..."
+    rssh 'cat > /tmp/xray-rollback-watchdog.sh <<"EOF"
+#!/bin/sh
+CANCEL=/tmp/xray-rollback-cancel
+BACKUP=/usr/local/etc/xray/config.json.bak-rollback
+LOG=/var/log/xray-rollback.log
+PROXY=http://127.0.0.1:8118
+sleep 300
+if [ -f "$CANCEL" ]; then
+  echo "[$(date)] cancel flag, watchdog exits cleanly" >> $LOG
+  rm -f $CANCEL
+  exit 0
+fi
+OK=0
+for u in "https://www.google.com/generate_204" "https://www.gstatic.com/generate_204" "https://httpbin.org/ip"; do
+  if curl -sk --max-time 8 --proxy $PROXY -o /dev/null -w "%{http_code}" "$u" 2>/dev/null | grep -qE "^(20[0-9]|30[0-9])$"; then
+    OK=$((OK+1))
+  fi
+done
+if [ $OK -ge 2 ]; then
+  echo "[$(date)] health OK ($OK/3) — no rollback" >> $LOG
+  exit 0
+fi
+echo "[$(date)] HEALTH FAIL ($OK/3) — rolling back" >> $LOG
+cp $BACKUP /usr/local/etc/xray/config.json
+/etc/init.d/xray restart
+EOF
+chmod +x /tmp/xray-rollback-watchdog.sh
+rm -f /tmp/xray-rollback-cancel
+nohup /tmp/xray-rollback-watchdog.sh >/dev/null 2>&1 &
+'
+  else
+    log_warn "curl на роутере отсутствует — apply без rollback-страховки"
+  fi
+
+  log_info "Применяю новый конфиг + restart xray..."
+  rssh "mv $new $cfg && /etc/init.d/xray restart && sleep 4 && /etc/init.d/xray status"
+
+  if [ "$has_curl" = "yes" ]; then
+    log_warn "Watchdog активен 5 минут. Если интернет работает — выполни СЕЙЧАС:"
+    log_warn "  ssh root@$ROUTER_IP \"touch /tmp/xray-rollback-cancel\""
+    log_warn "Иначе через 5 мин конфиг откатится автоматически."
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════
 # LAN IP change (optional, destructive — SSH drops)
 # ══════════════════════════════════════════════════════════════════════════
 
