@@ -628,6 +628,27 @@ grep -oE 'proxy-[a-z]+' /var/log/xray/access.log \
 - **curl не установлен на роутере по умолчанию** — нужно ставить руками через локальный `.apk` (см. раздел про TG-watchdog выше).
 - В config.json добавлен **четвёртый inbound** `http-local` на 127.0.0.1:8118 (HTTP-proxy для локальных скриптов на роутере, ходит через balancer → нужный outbound).
 
+### Инцидент: OOM xray (2026-05-11 ~14:09 MSK)
+
+**Симптом**: VPN дёргался, watchdog отправил `🛑 XRAY_DEAD`, потом `🔄 balancer: gRPC`. За час было 6 переключений balancer'а.
+
+**Причина**: OOM killer убил xray дважды (RSS 113-122MB на машине с 239MB RAM total). После каждого убийства procd через `respawn_threshold` поднимал xray заново, но в момент рестарта VPN мёртв ~30-60 секунд.
+
+**Что жрало память**:
+1. `log.access = /var/log/xray/access.log` — постоянная запись на tmpfs + буферы xray.
+2. `observatory.enableConcurrency = true` — xray параллельно пингует **три** outbound'а каждые 10с (одновременные TLS-хендшейки + 3x HTTP-клиента).
+3. `strategy: leastPing` — наш конфиг с близкими по ping outbound'ами заставлял balancer переключаться каждый probe-цикл, что плодило новые соединения.
+
+**Фиксы (в config.json + шаблоне)**:
+- `log.access: "none"` — отключили access.log полностью. Минус: `xray api stats` по outbound'ам не работает, `Diagnostics → распределение трафика по слоям` показывает пусто.
+- `observatory.enableConcurrency: false` — пинги по одному.
+- `observatory.probeInterval: "30s"` — вместо 10s. Реже пинги, меньше переключений, время на отлов отвала всё ещё приемлемое.
+- `balancer.strategy: "random"` — выбираем один из живых случайно, держимся за него **пока он жив**. Не дёргается на флуктуациях ping'а.
+
+**Результат**: xray RSS упал со **118MB до 28MB**, available RAM с 9MB до 99MB. Запас 70+MB на пиковые ситуации.
+
+**Если когда-нибудь захочется access.log обратно** (например для статистики или диагностики): вернуть `"access": "/var/log/xray/access.log"`, но следить за `free` через `Diagnostics → free`. На AX3000T с 256MB total — на грани.
+
 ### Команды для Сида
 
 ```powershell

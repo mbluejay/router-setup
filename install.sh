@@ -447,7 +447,7 @@ generate_config() {
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
+    "access": "none",
     "error": "/var/log/xray/error.log"
   },
   "api": {
@@ -457,8 +457,8 @@ generate_config() {
   "observatory": {
     "subjectSelector": ["proxy-"],
     "probeURL": "https://www.gstatic.com/generate_204",
-    "probeInterval": "10s",
-    "enableConcurrency": true
+    "probeInterval": "30s",
+    "enableConcurrency": false
   },
   "dns": {
     "servers": [
@@ -599,7 +599,7 @@ generate_config() {
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "balancers": [
-      { "tag": "vpn-balancer", "selector": ["proxy-"], "strategy": { "type": "leastPing" } }
+      { "tag": "vpn-balancer", "selector": ["proxy-"], "strategy": { "type": "random" } }
     ],
     "rules": [
       { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
@@ -1165,7 +1165,7 @@ menu_diagnostics() {
       7) diag_full_audit ;;
       8) rssh "echo '=== /usr/local/etc/xray/custom-direct.list ==='; cat /usr/local/etc/xray/custom-direct.list 2>/dev/null || echo '(empty or missing)'"; pause ;;
       9) rssh "/usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer 2>&1"; pause ;;
-      10) rssh "grep -oE 'proxy-[a-z]+' /var/log/xray/access.log | sort | uniq -c | sort -rn"; pause ;;
+      10) rssh "grep -oE 'proxy-[a-z]+' /var/log/xray/access.log 2>/dev/null | sort | uniq -c | sort -rn || echo 'access.log отключён (memory saving) — статистики коннектов нет'"; pause ;;
       0) return ;;
       *) log_warn "Неверный выбор"; sleep 1 ;;
     esac

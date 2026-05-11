@@ -1,7 +1,7 @@
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
+    "access": "none",
     "error": "/var/log/xray/error.log"
   },
   "api": {
@@ -11,8 +11,8 @@
   "observatory": {
     "subjectSelector": ["proxy-"],
     "probeURL": "https://www.gstatic.com/generate_204",
-    "probeInterval": "10s",
-    "enableConcurrency": true
+    "probeInterval": "30s",
+    "enableConcurrency": false
   },
   "dns": {
     "servers": [
@@ -201,7 +201,7 @@
       {
         "tag": "vpn-balancer",
         "selector": ["proxy-"],
-        "strategy": { "type": "leastPing" }
+        "strategy": { "type": "random" }
       }
     ],
     "rules": [
