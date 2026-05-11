@@ -1,0 +1,11 @@
+# State and credentials — never commit
+.state/
+state.env
+server-state.env
+*.bak
+*.bak-*
+.tmp-*
+
+# Local artifacts
+*.log
+*.pid

@@ -4,6 +4,16 @@
     "access": "/var/log/xray/access.log",
     "error": "/var/log/xray/error.log"
   },
+  "api": {
+    "tag": "api",
+    "services": ["StatsService", "ObservatoryService", "RoutingService"]
+  },
+  "observatory": {
+    "subjectSelector": ["proxy-"],
+    "probeURL": "https://www.gstatic.com/generate_204",
+    "probeInterval": "10s",
+    "enableConcurrency": true
+  },
   "dns": {
     "servers": [
       {
@@ -69,11 +79,18 @@
         "port": 53,
         "network": "tcp,udp"
       }
+    },
+    {
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" }
     }
   ],
   "outbounds": [
     {
-      "tag": "proxy",
+      "tag": "proxy-reality",
       "protocol": "vless",
       "settings": {
         "vnext": [{
@@ -86,8 +103,73 @@
           }]
         }]
       },
-      "streamSettings": <<STREAM_SETTINGS>>,
-      "sockopt": { "mark": 255 }
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "<<VLESS_SNI>>",
+          "fingerprint": "<<VLESS_FP>>",
+          "publicKey": "<<VLESS_PBKEY>>",
+          "shortId": "<<VLESS_SID>>"
+        },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-ws",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "<<VLESS_SERVER>>",
+          "port": 8443,
+          "users": [{
+            "id": "<<VLESS_UUID>>",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "<<SERVER_DOMAIN>>",
+          "fingerprint": "chrome",
+          "alpn": ["http/1.1"]
+        },
+        "wsSettings": {
+          "path": "/ws",
+          "headers": { "Host": "<<SERVER_DOMAIN>>" }
+        },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-grpc",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "<<VLESS_SERVER>>",
+          "port": 2053,
+          "users": [{
+            "id": "<<VLESS_UUID>>",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "<<SERVER_DOMAIN>>",
+          "fingerprint": "chrome",
+          "alpn": ["h2"]
+        },
+        "grpcSettings": {
+          "serviceName": "<<GRPC_SERVICE>>",
+          "multiMode": true
+        },
+        "sockopt": { "mark": 255 }
+      }
     },
     {
       "tag": "direct",
@@ -108,7 +190,19 @@
   ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      {
+        "tag": "vpn-balancer",
+        "selector": ["proxy-"],
+        "strategy": { "type": "leastPing" }
+      }
+    ],
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["api-in"],
+        "outboundTag": "api"
+      },
       {
         "type": "field",
         "inboundTag": ["dns-in"],
@@ -177,7 +271,7 @@
       },
       {
         "type": "field",
-        "outboundTag": "proxy",
+        "balancerTag": "vpn-balancer",
         "network": "tcp,udp"
       }
     ]
@@ -185,39 +279,30 @@
 }
 
 // ============================================================
-// ПРИМЕЧАНИЕ: Вместо <<STREAM_SETTINGS>> подставить один из блоков ниже:
+// АРХИТЕКТУРА (v2, см. EXTRA_CARE.md):
 //
-// --- VLESS + REALITY + TCP (наиболее распространённый) ---
-// "streamSettings": {
-//   "network": "tcp",
-//   "security": "reality",
-//   "realitySettings": {
-//     "serverName": "<<VLESS_SNI>>",
-//     "fingerprint": "<<VLESS_FP>>",
-//     "publicKey": "<<VLESS_PBKEY>>",
-//     "shortId": "<<VLESS_SID>>"
-//   }
-// }
+// Три proxy-outbound'а на один сервер, разные транспорты, один UUID:
+//   L1 :443  VLESS + Reality + Vision   — основной, маскировка под чужой TLS
+//   L2 :8443 VLESS + WS + TLS  /ws       — fallback если Reality режут по fingerprint
+//   L3 :2053 VLESS + gRPC + TLS h2       — fallback если WS режут
 //
-// --- VLESS + TLS + WebSocket ---
-// "streamSettings": {
-//   "network": "ws",
-//   "security": "tls",
-//   "tlsSettings": {
-//     "serverName": "<<VLESS_SNI>>",
-//     "fingerprint": "<<VLESS_FP>>"
-//   },
-//   "wsSettings": {
-//     "path": "<<VLESS_PATH>>",
-//     "headers": { "Host": "<<VLESS_HOST>>" }
-//   }
-// }
+// Observatory пингует каждый outbound через probeURL раз в probeInterval.
+// Balancer "vpn-balancer" со стратегией leastPing выбирает живой outbound
+// с минимальным ping'ом. Если все три мертвы — трафик дропается (без падения
+// в direct: безопаснее дропнуть, чем светить реальный IP).
 //
-// --- VLESS + TLS + gRPC ---
-// "streamSettings": {
-//   "network": "grpc",
-//   "security": "tls",
-//   "tlsSettings": { "serverName": "<<VLESS_SNI>>" },
-//   "grpcSettings": { "serviceName": "<<VLESS_PATH>>" }
-// }
+// Плейсхолдеры:
+//   <<SERVER_DOMAIN>>  — основной домен сервера (для TLS SNI на L2/L3)
+//   <<VLESS_SERVER>>   — адрес сервера для подключения (IP или домен)
+//   <<VLESS_PORT>>     — порт L1 (обычно 443)
+//   <<VLESS_UUID>>     — общий UUID для всех трёх слоёв
+//   <<VLESS_FLOW>>     — flow для L1 (обычно "xtls-rprx-vision")
+//   <<VLESS_SNI>>      — SNI для L1 Reality (маскировка, чужой домен типа www.apple.com)
+//   <<VLESS_FP>>       — fingerprint для L1 (обычно "chrome")
+//   <<VLESS_PBKEY>>    — publicKey Reality (от сервера)
+//   <<VLESS_SID>>      — shortId Reality
+//   <<GRPC_SERVICE>>   — имя gRPC service на сервере (например, "grpc-<host>")
+//
+// L2 и L3 порты захардкожены (8443/2053) — синхронизированы с server-install.sh.
+// path для WS — /ws (тоже захардкожено).
 // ============================================================

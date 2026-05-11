@@ -21,10 +21,11 @@
 ## Что делает
 
 - **Прозрачный прокси** через TProxy (nftables) — ничего не настраивать на клиентах
-- **Split-routing**: российское напрямую, остальное через VLESS
+- **Multi-layer fallback (v2)**: три proxy-outbound'а на один сервер (Reality / WS+TLS / gRPC+TLS), xray Observatory мониторит каждый, balancer выбирает живой с минимальным ping'ом. Подробно — [EXTRA_CARE.md](EXTRA_CARE.md)
+- **Split-routing**: российское напрямую, остальное через balancer
   - direct: `geoip:ru`, `geosite:category-ru`, `geosite:whitelist`, `geosite:steam`, `geosite:microsoft`, `geosite:apple`, торренты 6881–6889
   - block: `geosite:win-spy` (телеметрия Windows → blackhole)
-  - proxy: всё остальное
+  - proxy: всё остальное (через balancer)
 - **Custom direct list**: команды `xray-add-direct <domain>` / `xray-remove-direct <domain>` — добавлять/удалять домены в обход VPN одной командой. Для сайтов, детектящих VPN по outbound IP (СБП-кассы, платёжные фингерпринт-сервисы)
 - **Split-DNS**: DoH Cloudflare для проблемных доменов, Yandex для RU, 8.8.8.8 fallback через VPN
 - **WiFi**: только 5ГГц (2.4ГГц отключён)
@@ -32,6 +33,7 @@
 - **DNS-хайджек**: принудительно заворачивает DNS всех клиентов в локальный dnsmasq (фикс Xbox/PS5/Chromecast)
 - **IPv6 отключён** — нет Happy Eyeballs-задержек и IPv6-утечек
 - Авто-обновление geo-баз раз в неделю, ротация логов ежечасно
+- **(опционально) TG-watchdog**: бот в Telegram отчитывается о переключениях balancer'а и полном отвале VPN. См. EXTRA_CARE.md
 
 Подробности — в [vless-tproxy-openwrt-ax3000t.md](vless-tproxy-openwrt-ax3000t.md).
 
@@ -78,7 +80,7 @@ xray:     not installed
 
 Спросит IP роутера и новую VLESS-ссылку, распарсит, покажет параметры, зальёт конфиг и применит.
 
-**Diagnostics** — статус xray, тест конфига, live access.log, DNS-проверки, полный audit.
+**Diagnostics** — статус xray, тест конфига, live access.log, DNS-проверки, полный audit, состояние balancer'а (`xray api bi vpn-balancer`), распределение трафика по слоям (reality/ws/grpc).
 
 **Uninstall** — откатывает xray-установку к состоянию до запуска скрипта.
 Установщик сохраняет снэпшот `uci` конфигурации до правок (dnsmasq, network, odhcpd) — откат возвращает их в исходное состояние.
@@ -97,9 +99,11 @@ WiFi и LAN IP по умолчанию не трогает (они меняют 
 | `README.md` | Этот файл — обзор и точка входа |
 | `vless-tproxy-openwrt-ax3000t.md` | Документация для человека — архитектура, диагностика, подводные камни |
 | `vless-tproxy-openwrt-ax3000t.claude.xml` | То же для Claude Code — структурированный XML-промпт |
-| `install.sh` | Интерактивный установщик (bash, Linux/macOS/Git Bash) |
+| `install.sh` | Интерактивный установщик клиентской части (bash, Linux/macOS/Git Bash) |
 | `install.ps1` | Интерактивный установщик (PowerShell, Windows) |
-| `config.json.template` | Шаблон конфига xray с плейсхолдерами |
+| `server-install.sh` | Интерактивный установщик **серверной** части (L2/L3 inbound + LE-cert) через 3x-ui API |
+| `EXTRA_CARE.md` | Архитектура multi-layer fallback, что фактически сделано, что осталось |
+| `config.json.template` | Шаблон конфига xray v2 (3 outbound + observatory + balancer) |
 | `proxy-only.json.template` | Шаблон временного HTTP proxy для bootstrap |
 | `xray-init` | init.d сервис procd |
 | `xray-tproxy-setup.sh` | nftables TProxy + ip rules + DNS hijack |

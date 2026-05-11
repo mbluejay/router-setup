@@ -33,6 +33,9 @@ WIFI_SSID=""
 WIFI_PASSWORD=""
 WIFI_CHANNEL="auto"
 NEW_LAN_IP=""
+SERVER_DOMAIN=""          # основной домен сервера для L2/L3 TLS (см. EXTRA_CARE.md)
+TG_TOKEN=""               # опционально — для TG-watchdog
+TG_CHAT_ID=""             # опционально — для TG-watchdog
 
 # Parsed VLESS fields
 VLESS_NAME="" VLESS_UUID="" VLESS_SERVER="" VLESS_PORT=""
@@ -83,6 +86,9 @@ VLESS_URL=$(printf '%q' "$VLESS_URL")
 WIFI_SSID=$(printf '%q' "$WIFI_SSID")
 WIFI_CHANNEL=$(printf '%q' "$WIFI_CHANNEL")
 NEW_LAN_IP=$(printf '%q' "$NEW_LAN_IP")
+SERVER_DOMAIN=$(printf '%q' "$SERVER_DOMAIN")
+TG_TOKEN=$(printf '%q' "$TG_TOKEN")
+TG_CHAT_ID=$(printf '%q' "$TG_CHAT_ID")
 EOF
 }
 
@@ -389,6 +395,12 @@ collect_install_params() {
     fi
   done
 
+  printf '\n'
+  log_info "Основной домен сервера (для TLS на L2/L3 fallback-слоях, см. EXTRA_CARE.md)"
+  log_info "Должен соответствовать сертификату который установлен на сервере по пути"
+  log_info "/root/cert/<domain>/{fullchain.pem,privkey.pem}"
+  ask "SERVER_DOMAIN (например myhost.example.com)" SERVER_DOMAIN
+
   ask "WiFi SSID (5ГГц)" WIFI_SSID
   if [ -z "$WIFI_PASSWORD" ]; then
     ask_secret "WiFi пароль (мин 8 симв)" WIFI_PASSWORD
@@ -410,55 +422,26 @@ collect_install_params() {
 # Feature: generate config.json with parsed VLESS params
 # ══════════════════════════════════════════════════════════════════════════
 
+# Генерирует config.json v2 с тремя proxy-outbound'ами + observatory + balancer.
+# L1 (Reality+TCP+Vision) берётся из распарсенной VLESS-ссылки.
+# L2 (WS+TLS:8443/ws) и L3 (gRPC+TLS:2053) — параметры захардкожены,
+# синхронизированы с тем что создаёт server-install.sh на стороне сервера.
 generate_config() {
   local out="$1"
-  local stream=""
-  case "$VLESS_SECURITY-$VLESS_TRANSPORT" in
-    reality-tcp)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "tcp",
-          "security": "reality",
-          "realitySettings": {
-            "serverName": "$VLESS_SNI",
-            "fingerprint": "$VLESS_FP",
-            "publicKey": "$VLESS_PBKEY",
-            "shortId": "$VLESS_SID"
-          },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    tls-ws)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "ws",
-          "security": "tls",
-          "tlsSettings": { "serverName": "$VLESS_SNI", "fingerprint": "$VLESS_FP" },
-          "wsSettings": { "path": "$VLESS_PATH", "headers": { "Host": "$VLESS_HOST" } },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    tls-grpc)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "grpc",
-          "security": "tls",
-          "tlsSettings": { "serverName": "$VLESS_SNI" },
-          "grpcSettings": { "serviceName": "$VLESS_PATH" },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    *)
-      log_err "Неподдерживаемая комбинация security=$VLESS_SECURITY transport=$VLESS_TRANSPORT"
-      return 1
-      ;;
-  esac
+
+  if [ "$VLESS_SECURITY-$VLESS_TRANSPORT" != "reality-tcp" ]; then
+    log_err "Шаблон v2 ожидает Reality+TCP для L1. Получено: security=$VLESS_SECURITY transport=$VLESS_TRANSPORT"
+    return 1
+  fi
+
+  if [ -z "$SERVER_DOMAIN" ]; then
+    log_warn "SERVER_DOMAIN пуст — L2/L3 не смогут проверить TLS-сертификат"
+    log_warn "Задай SERVER_DOMAIN в state.env или через collect_params"
+    SERVER_DOMAIN="${VLESS_SERVER}"   # fallback: IP, TLS будет ругаться
+  fi
+
+  local grpc_service
+  grpc_service="grpc-$(echo "$SERVER_DOMAIN" | tr '.' '-')"
 
   cat > "$out" <<CFG
 {
@@ -466,6 +449,16 @@ EOF
     "loglevel": "warning",
     "access": "/var/log/xray/access.log",
     "error": "/var/log/xray/error.log"
+  },
+  "api": {
+    "tag": "api",
+    "services": ["StatsService", "ObservatoryService", "RoutingService"]
+  },
+  "observatory": {
+    "subjectSelector": ["proxy-"],
+    "probeURL": "https://www.gstatic.com/generate_204",
+    "probeInterval": "10s",
+    "enableConcurrency": true
   },
   "dns": {
     "servers": [
@@ -505,11 +498,18 @@ EOF
       "port": 5300,
       "protocol": "dokodemo-door",
       "settings": { "address": "8.8.8.8", "port": 53, "network": "tcp,udp" }
+    },
+    {
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" }
     }
   ],
   "outbounds": [
     {
-      "tag": "proxy",
+      "tag": "proxy-reality",
       "protocol": "vless",
       "settings": {
         "vnext": [{
@@ -518,7 +518,67 @@ EOF
           "users": [{ "id": "$VLESS_UUID", "flow": "$VLESS_FLOW", "encryption": "none" }]
         }]
       },
-$stream
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "$VLESS_SNI",
+          "fingerprint": "$VLESS_FP",
+          "publicKey": "$VLESS_PBKEY",
+          "shortId": "$VLESS_SID"
+        },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-ws",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "$VLESS_SERVER",
+          "port": 8443,
+          "users": [{ "id": "$VLESS_UUID", "encryption": "none" }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "$SERVER_DOMAIN",
+          "fingerprint": "chrome",
+          "alpn": ["http/1.1"]
+        },
+        "wsSettings": {
+          "path": "/ws",
+          "headers": { "Host": "$SERVER_DOMAIN" }
+        },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-grpc",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "$VLESS_SERVER",
+          "port": 2053,
+          "users": [{ "id": "$VLESS_UUID", "encryption": "none" }]
+        }]
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "$SERVER_DOMAIN",
+          "fingerprint": "chrome",
+          "alpn": ["h2"]
+        },
+        "grpcSettings": {
+          "serviceName": "$grpc_service",
+          "multiMode": true
+        },
+        "sockopt": { "mark": 255 }
+      }
     },
     {
       "tag": "direct",
@@ -531,7 +591,11 @@ $stream
   ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      { "tag": "vpn-balancer", "selector": ["proxy-"], "strategy": { "type": "leastPing" } }
+    ],
     "rules": [
+      { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
       { "type": "field", "inboundTag": ["dns-in"], "outboundTag": "dns-out" },
       { "type": "field", "outboundTag": "block", "domain": ["geosite:win-spy"] },
       { "type": "field", "outboundTag": "direct", "ip": ["geoip:private"] },
@@ -545,7 +609,7 @@ $stream
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
       { "type": "field", "outboundTag": "block",  "network": "udp", "port": "443" },
-      { "type": "field", "outboundTag": "proxy",  "network": "tcp,udp" }
+      { "type": "field", "balancerTag": "vpn-balancer", "network": "tcp,udp" }
     ]
   }
 }
@@ -782,6 +846,37 @@ feature_quic_block_install() {
   log_ok "[QUIC-BLOCK] Активно (часть конфига)"
 }
 
+# Feature: Telegram watchdog — alerts on balancer switches / VPN death
+feature_tg_watchdog_install() {
+  log_step "[TG-WATCHDOG] Установка Telegram-уведомлений"
+
+  if [ -z "$TG_TOKEN" ]; then
+    log_info "Создай бота через @BotFather и узнай chat_id через @userinfobot."
+    ask "Telegram bot TOKEN (формат 123456:ABC...)" TG_TOKEN
+  fi
+  if [ -z "$TG_CHAT_ID" ]; then
+    ask "Telegram chat_id" TG_CHAT_ID
+  fi
+  save_state
+
+  log_info "Заливаю скрипты watchdog..."
+  rscp "$SCRIPT_DIR/xray-tg-watchdog.sh" "/usr/local/bin/xray-tg-watchdog.sh"
+  rscp "$SCRIPT_DIR/xray-tg-daily-summary.sh" "/usr/local/bin/xray-tg-daily-summary.sh"
+  rssh "chmod +x /usr/local/bin/xray-tg-watchdog.sh /usr/local/bin/xray-tg-daily-summary.sh"
+
+  log_info "Записываю креды в /etc/xray-tg-creds..."
+  rssh "cat > /etc/xray-tg-creds <<EOF
+export TG_TOKEN='$TG_TOKEN'
+export TG_CHAT_ID='$TG_CHAT_ID'
+EOF
+chmod 600 /etc/xray-tg-creds"
+
+  log_info "Добавляю в cron..."
+  rssh "(crontab -l 2>/dev/null | grep -v xray-tg-; echo '* * * * * /usr/local/bin/xray-tg-watchdog.sh >/dev/null 2>&1'; echo '59 23 * * * /usr/local/bin/xray-tg-daily-summary.sh >/dev/null 2>&1') | crontab -"
+
+  log_ok "[TG-WATCHDOG] Установлено. Первое уведомление придёт в течение минуты."
+}
+
 # ══════════════════════════════════════════════════════════════════════════
 # LAN IP change (optional, destructive — SSH drops)
 # ══════════════════════════════════════════════════════════════════════════
@@ -850,7 +945,7 @@ menu_full_install() {
 
 # Feature toggle state
 declare -A FEATURE_ENABLED=(
-  [core]=1 [log]=1 [dnshj]=1 [doh]=1 [quic]=1 [wifi]=1 [ipv6]=1
+  [core]=1 [log]=1 [dnshj]=1 [doh]=1 [quic]=1 [wifi]=1 [ipv6]=1 [tg]=0
 )
 
 render_feature() {
@@ -873,6 +968,7 @@ menu_custom_install() {
     render_feature log   "Log rotation" 5
     render_feature doh   "Cloudflare DoH for x.com/twitter/themoviedb" 6
     render_feature quic  "QUIC block rutracker.org + claude.ai" 7
+    render_feature tg    "Telegram watchdog (уведомления о fallback)" 8
     printf '    c) WiFi канал: %-6s  [auto | 36 | 100 | 149]\n' "$WIFI_CHANNEL"
     printf '\n  9) Продолжить к установке\n'
     printf '  0) Назад\n\n'
@@ -886,6 +982,7 @@ menu_custom_install() {
       5) toggle_feature log ;;
       6) toggle_feature doh ;;
       7) toggle_feature quic ;;
+      8) toggle_feature tg ;;
       c|C)
         case "$WIFI_CHANNEL" in
           auto) WIFI_CHANNEL=36 ;;
@@ -916,6 +1013,7 @@ menu_custom_install() {
   [ "${FEATURE_ENABLED[quic]}"  = 1 ] && feature_quic_block_install
   [ "${FEATURE_ENABLED[wifi]}"  = 1 ] && feature_wifi_install
   [ "${FEATURE_ENABLED[ipv6]}"  = 1 ] && feature_ipv6_install
+  [ "${FEATURE_ENABLED[tg]}"    = 1 ] && feature_tg_watchdog_install
   change_lan_ip
 
   log_ok "Custom install завершена"
@@ -1022,6 +1120,8 @@ menu_diagnostics() {
     printf '  6) ip rules + routes\n'
     printf '  7) Полный audit\n'
     printf '  8) Custom-direct список (cat custom-direct.list)\n'
+    printf '  9) Balancer info (xray api bi vpn-balancer)\n'
+    printf ' 10) Распределение трафика по слоям (proxy-reality/ws/grpc)\n'
     printf '  0) Назад\n\n'
     printf '> '
     read -r choice
@@ -1034,6 +1134,8 @@ menu_diagnostics() {
       6) rssh "ip rule show; echo; ip route show table 100"; pause ;;
       7) diag_full_audit ;;
       8) rssh "echo '=== /usr/local/etc/xray/custom-direct.list ==='; cat /usr/local/etc/xray/custom-direct.list 2>/dev/null || echo '(empty or missing)'"; pause ;;
+      9) rssh "/usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer 2>&1"; pause ;;
+      10) rssh "grep -oE 'proxy-[a-z]+' /var/log/xray/access.log | sort | uniq -c | sort -rn"; pause ;;
       0) return ;;
       *) log_warn "Неверный выбор"; sleep 1 ;;
     esac
@@ -1084,6 +1186,10 @@ diag_full_audit() {
     df -h /tmp
     echo '=== [14] LAST XRAY ERRORS ==='
     tail -5 /var/log/xray/error.log 2>/dev/null
+    echo '=== [15] BALANCER ==='
+    /usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer 2>&1
+    echo '=== [16] OUTBOUND DISTRIBUTION ==='
+    grep -oE 'proxy-[a-z]+' /var/log/xray/access.log 2>/dev/null | sort | uniq -c | sort -rn | head -5
   "
   pause
 }
