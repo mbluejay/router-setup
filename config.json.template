@@ -86,6 +86,13 @@
       "port": 10085,
       "protocol": "dokodemo-door",
       "settings": { "address": "127.0.0.1" }
+    },
+    {
+      "tag": "http-local",
+      "listen": "127.0.0.1",
+      "port": 8118,
+      "protocol": "http",
+      "settings": { "timeout": 30 }
     }
   ],
   "outbounds": [

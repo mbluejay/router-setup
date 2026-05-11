@@ -10,17 +10,16 @@ CREDS=/etc/xray-tg-creds
 
 LOG=/var/log/xray-tg-watchdog.log
 ACCESS=/var/log/xray/access.log
+PROXY=http://127.0.0.1:8118
 
 TODAY=$(date '+%Y-%m-%d')
 
-# Подсчёт коннектов по слоям (parser работает на любом awk)
 COUNTS=$(grep -oE 'proxy-[a-z]+' "$ACCESS" 2>/dev/null | sort | uniq -c | sort -rn)
-[ -z "$COUNTS" ] && COUNTS="(пусто — access.log не содержит proxy-* записей)"
+[ -z "$COUNTS" ] && COUNTS="(пусто)"
 
-# Переключения за сегодня (из watchdog-лога)
-SWITCHES=$(grep "$TODAY" "$LOG" 2>/dev/null | grep -c "state changed" || echo 0)
+SWITCHES=$(grep "$TODAY" "$LOG" 2>/dev/null | grep -c "state changed")
+[ -z "$SWITCHES" ] && SWITCHES=0
 
-# Текущий выбранный outbound
 CURRENT=$(/usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer 2>/dev/null \
   | awk '/Selects:/{getline; print $2}')
 [ -z "$CURRENT" ] && CURRENT="неизвестно"
@@ -33,8 +32,9 @@ MSG="📊 Итог за $TODAY
 Распределение коннектов (с момента старта xray):
 $COUNTS"
 
-curl -sk --max-time 30 --retry 5 --retry-delay 30 \
-  --interface br-lan \
-  "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
+curl -sk --max-time 30 \
+  --retry 5 --retry-delay 30 --retry-all-errors \
+  --proxy "$PROXY" \
   -d "chat_id=$TG_CHAT_ID" \
-  --data-urlencode "text=$MSG" >/dev/null 2>&1
+  --data-urlencode "text=$MSG" \
+  "https://api.telegram.org/bot$TG_TOKEN/sendMessage" >/dev/null 2>&1

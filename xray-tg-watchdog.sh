@@ -4,16 +4,22 @@
 # Запускается через cron каждую минуту:
 #   * * * * * /usr/local/bin/xray-tg-watchdog.sh >/dev/null 2>&1
 #
-# Креды лежат в /etc/xray-tg-creds (chmod 600):
+# Креды в /etc/xray-tg-creds (chmod 600):
 #   export TG_TOKEN=123456:ABC...
 #   export TG_CHAT_ID=987654321
 #
 # Состояние в /etc/xray-tg-state — после ребута сохраняется на overlay.
-# При первом запуске после ребута будет сообщение типа "INIT → proxy-..."
+# Первое срабатывание после ребута отправит "INIT → текущий outbound".
+#
+# Требует:
+#   - curl на роутере (см. install.sh feature_tg_watchdog_install)
+#   - xray HTTP-inbound на 127.0.0.1:8118 в config.json (api.telegram.org
+#     блокируется по SNI провайдером, ходим через xray балансер)
 
 CREDS=/etc/xray-tg-creds
 STATE=/etc/xray-tg-state
 LOG=/var/log/xray-tg-watchdog.log
+PROXY=http://127.0.0.1:8118
 
 if [ ! -r "$CREDS" ]; then
   echo "[$(date)] $CREDS not readable, exit" >> "$LOG"
@@ -23,7 +29,7 @@ fi
 
 PREV=$(cat "$STATE" 2>/dev/null || echo INIT)
 
-# 1) xray process check (without pgrep — OpenWrt не всегда его имеет)
+# 1) xray process check
 XRAY_PID=""
 for pid_dir in /proc/[0-9]*; do
   [ -r "$pid_dir/comm" ] || continue
@@ -36,7 +42,6 @@ done
 if [ -z "$XRAY_PID" ]; then
   NOW="XRAY_DEAD"
 else
-  # 2) balancer current selection
   NOW=$(/usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer 2>/dev/null \
     | awk '/Selects:/{getline; print $2}')
   [ -z "$NOW" ] && NOW="ALL_DEAD"
@@ -48,25 +53,29 @@ fi
 
 case "$NOW" in
   XRAY_DEAD)     ICON="🛑"; TEXT="xray процесс умер — VPN полностью не работает";;
-  ALL_DEAD)      ICON="🚨"; TEXT="ВСЕ proxy-outbound dead — observatory не может найти живой";;
+  ALL_DEAD)      ICON="🚨"; TEXT="ВСЕ proxy-outbound dead — observatory не нашёл живой";;
   proxy-reality) ICON="✅"; TEXT="balancer: L1 (Reality)";;
   proxy-ws)      ICON="🔄"; TEXT="balancer: L2 (WS+TLS)";;
   proxy-grpc)    ICON="🔄"; TEXT="balancer: L3 (gRPC+TLS)";;
   *)             ICON="❓"; TEXT="balancer выбрал: $NOW";;
 esac
 
+TIME=$(date '+%Y-%m-%d %H:%M:%S')
 MSG="$ICON $TEXT
 prev: $PREV
 now:  $NOW
-time: $(date '+%Y-%m-%d %H:%M:%S')"
+time: $TIME"
 
-# Запрос идёт через TProxy (без mark=255), чтобы api.telegram.org прошёл через VPN.
-# Если все proxy мертвы — curl ретраит 30 раз по минуте; алерт уйдёт когда хоть один оживёт.
-curl -sk --max-time 30 --retry 30 --retry-delay 60 --retry-connrefused \
-  --interface br-lan \
-  "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
-  -d "chat_id=$TG_CHAT_ID" \
-  --data-urlencode "text=$MSG" >/dev/null 2>&1 &
+# Отправка асинхронно — не блокируем cron.
+# --retry: если все proxy мертвы и xray HTTP-inbound тоже не пускает, попробует ещё.
+(
+  curl -sk --max-time 30 \
+    --retry 10 --retry-delay 30 --retry-all-errors \
+    --proxy "$PROXY" \
+    -d "chat_id=$TG_CHAT_ID" \
+    --data-urlencode "text=$MSG" \
+    "https://api.telegram.org/bot$TG_TOKEN/sendMessage" >/dev/null 2>>"$LOG"
+) &
 
-echo "[$(date)] state changed: $PREV -> $NOW" >> "$LOG"
+echo "[$TIME] state changed: $PREV -> $NOW" >> "$LOG"
 echo "$NOW" > "$STATE"

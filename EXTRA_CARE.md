@@ -568,6 +568,20 @@ grep -oE 'proxy-[a-z]+' /var/log/xray/access.log \
 
 После этого `install.sh` подцепит и применит.
 
+### Нюансы которые вылезли при первой установке (2026-05-11)
+
+1. **api.telegram.org блокируется по SNI** провайдером. Прямой запрос (curl/wget с router'а через WAN) даёт `Operation not permitted` — это reset от DPI. **Решение:** ходить через xray http-inbound (см. ниже).
+
+2. **На OpenWrt нет curl по умолчанию**. Стоит только `wget-nossl` (без HTTPS) и `uclient-fetch` (умеет HTTPS, но **не умеет CONNECT-туннель** к HTTPS через HTTP-proxy — критично для нашей схемы).
+   - **`apk add curl` через online feeds не работает** — Fastly режет `downloads.openwrt.org` (та же причина что для setup в install.sh).
+   - **Решение:** скачать вручную с локального ПК и поставить через `apk add --no-network --allow-untrusted`. Нужны 8 пакетов: `curl`, `libcurl4`, `libopenssl3`, `libmbedtls21`, `libnghttp2-14`, `libssh2-1`, `zlib`, `ca-bundle`. URL шаблон: `https://downloads.openwrt.org/releases/25.12.2/packages/aarch64_cortex-a53/{packages|base}/<name>-<ver>-r1.apk`.
+
+3. **xray HTTP-inbound на 127.0.0.1:8118** нужен чтобы curl ходил через balancer. Добавлен в config.json и в шаблон. Простой `http` inbound, `timeout: 30`, без auth. `allowTransparent: true` — **не работает** с uclient-fetch (даёт connection timeout), оставлен дефолт.
+
+4. **Routing для http-local**: ничего отдельного делать не надо — общие routing rules (geoip:ru → direct, balancerTag → VPN) корректно матчат запросы к api.telegram.org (149.154.166/24 не в RU/private/categories) и отправляют через balancer.
+
+5. **Логика «алерт когда все proxy мертвы»**: curl с `--retry 10 --retry-delay 30 --retry-all-errors` — если все proxy в balancer мертвы, curl попробует 10 раз с интервалом 30с. Когда хоть один outbound оживёт — алерт уйдёт отложенно (~5 минут).
+
 ### Интеграция в `install.sh`
 
 Новая feature-функция `feature_tg_watchdog_install()`:
@@ -611,6 +625,8 @@ grep -oE 'proxy-[a-z]+' /var/log/xray/access.log \
 - На OpenWrt нет `ss` и `pgrep` — приходится использовать `netstat -tlnp` и обходиться без них.
 - 3x-ui SCP требует `-O` (legacy mode), потому что sftp-server не установлен.
 - На сервере параллельно крутятся danted, ss-server, mtg, OpenVPN — **не касались**, работают независимо.
+- **curl не установлен на роутере по умолчанию** — нужно ставить руками через локальный `.apk` (см. раздел про TG-watchdog выше).
+- В config.json добавлен **четвёртый inbound** `http-local` на 127.0.0.1:8118 (HTTP-proxy для локальных скриптов на роутере, ходит через balancer → нужный outbound).
 
 ### Команды для Сида
 

@@ -505,6 +505,13 @@ generate_config() {
       "port": 10085,
       "protocol": "dokodemo-door",
       "settings": { "address": "127.0.0.1" }
+    },
+    {
+      "tag": "http-local",
+      "listen": "127.0.0.1",
+      "port": 8118,
+      "protocol": "http",
+      "settings": { "timeout": 30 }
     }
   ],
   "outbounds": [
@@ -849,6 +856,29 @@ feature_quic_block_install() {
 # Feature: Telegram watchdog — alerts on balancer switches / VPN death
 feature_tg_watchdog_install() {
   log_step "[TG-WATCHDOG] Установка Telegram-уведомлений"
+
+  # Проверка зависимостей: curl нужен для запросов через xray http-proxy.
+  # uclient-fetch/wget-nossl на OpenWrt не умеют CONNECT-туннель к HTTPS через proxy,
+  # а api.telegram.org блокируется по SNI напрямую через WAN.
+  if ! rssh_q "command -v curl >/dev/null && echo ok" | grep -q ok; then
+    log_warn "curl не установлен на роутере — TG-watchdog не сможет отправлять сообщения"
+    log_warn "Поставь curl: apk через bootstrap-proxy не работает (Fastly режет feeds)"
+    log_warn "Способ: скачать curl-*.apk и его зависимости (libcurl4, libopenssl3, libmbedtls21,"
+    log_warn "         libnghttp2-14, libssh2-1, zlib, ca-bundle) из"
+    log_warn "         https://downloads.openwrt.org/releases/25.12.2/packages/aarch64_cortex-a53/"
+    log_warn "         и поставить через 'apk add --no-network --allow-untrusted /tmp/*.apk'"
+    if ! confirm "Продолжить установку TG-watchdog без curl?" n; then
+      return 1
+    fi
+  fi
+
+  # Также нужен http-local inbound в config.json (порт 8118 → balancer).
+  # Шаблон v2 его уже содержит, но если установка идёт поверх старого config —
+  # предупредим.
+  if ! rssh_q "grep -q '\"port\": 8118' /usr/local/etc/xray/config.json 2>/dev/null && echo ok" | grep -q ok; then
+    log_warn "В /usr/local/etc/xray/config.json нет http-local inbound на :8118"
+    log_warn "Запусти 'Update → Сменить VLESS URL' чтобы перегенерировать config с http-inbound"
+  fi
 
   if [ -z "$TG_TOKEN" ]; then
     log_info "Создай бота через @BotFather и узнай chat_id через @userinfobot."
