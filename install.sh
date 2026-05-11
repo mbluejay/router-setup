@@ -591,6 +591,7 @@ generate_config() {
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
       { "type": "field", "outboundTag": "block",  "network": "udp", "port": "443" },
+      { "type": "field", "outboundTag": "direct", "network": "udp" },
       { "type": "field", "balancerTag": "vpn-balancer", "network": "tcp,udp" }
     ]
   }

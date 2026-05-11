@@ -250,6 +250,11 @@
       },
       {
         "type": "field",
+        "outboundTag": "direct",
+        "network": "udp"
+      },
+      {
+        "type": "field",
         "balancerTag": "vpn-balancer",
         "network": "tcp,udp"
       }
