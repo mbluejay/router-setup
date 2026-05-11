@@ -704,6 +704,52 @@ WAN-адрес AX3000T = `192.168.1.65` (за upstream-роутером). Вне
 
 **Решение (long-term)**: миграция на **XHTTP** (см. ниже) — позволяет упаковать все слои в один порт 443.
 
+### Инцидент: Telegram-звонки сломались (2026-05-11 вечер)
+
+**Симптом**: голосовые звонки в Telegram перестали соединяться (сразу же после правки `udp → direct`).
+
+**Причина**: правило `udp → direct` пускало UDP-медиа TG напрямую через провайдера, который режет UDP к Telegram-IP (91.108.x.x, 149.154.160/20 и т.д.).
+
+**Фикс**: добавлено правило **перед** `udp→direct`, гонящее Telegram-IP/домены UDP через `proxy-grpc` outbound. VLESS+gRPC формально TCP-only транспорт, но TGCALLS умеет fallback в TCP, поэтому работает.
+
+```jsonc
+{ "type": "field", "outboundTag": "proxy-grpc", "network": "udp",
+  "ip": ["91.108.4.0/22","91.108.8.0/22","91.108.12.0/22","91.108.16.0/22",
+         "91.108.20.0/22","91.108.56.0/22","95.161.64.0/20",
+         "149.154.160.0/20","185.76.151.0/24"] },
+{ "type": "field", "outboundTag": "proxy-grpc", "network": "udp",
+  "domain": ["geosite:telegram"] }
+```
+
+**Discord voice** аналогичным фиксом **НЕ чинится**: Discord voice не имеет TCP-fallback, тащить чистый UDP через VLESS+gRPC (TCP) не получится. Discord-UDP оставлен `direct`. Решение долгосрочно — `Hysteria2` или `VLESS+mKCP` outbound (UDP-capable). Пока отложено.
+
+### Инцидент: YouTube на Xbox не грузил видео (2026-05-12 ночь)
+
+**Симптом**: на Xbox YouTube App открывался, звук на превью был, но видеоконтент не подгружался. На ноуте YouTube работал.
+
+**Ложная гипотеза**: gRPC деградировал, balancer случайно бросал часть стримов на медленный outbound. Временно убрал gRPC из selector balancer (`["proxy-reality"]`). **Не помогло** — Xbox продолжал лагать.
+
+**Реальная причина**: лимит **open files = 4096** для xray (default OpenWrt procd). Использовано ~3071 fd до проблемы. YouTube/Xbox открывает десятки параллельных HTTP/2 стримов на googlevideo CDN, при пике xray упирается в потолок: 
+
+```
+[Warning] transport/internet/tcp: failed to accepted raw connections >
+  accept tcp [::]:12345: accept4: too many open files
+```
+
+Аудио = один поток, прошёл; видео = много новых fd, отказы → видео висит.
+
+**Фикс**: в `/etc/init.d/xray` добавлено `procd_set_param limits nofile="65536 65536"` перед `procd_close_instance`. Проверка после рестарта:
+
+```sh
+PID=$(cat /var/run/xray.pid)
+cat /proc/$PID/limits | grep 'open files'
+# Max open files            65536                65536                files
+```
+
+Балансер вернули на `["proxy-"]` (reality+grpc как раньше). Зафиксировано в [`xray-init`](xray-init), `install.sh` не дублирует init-скрипт.
+
+**Урок**: при необъяснимых проблемах с высоконагруженными клиентами (Xbox, торренты, IPTV) — первым делом проверить `cat /proc/$(cat /var/run/xray.pid)/limits` и `ls /proc/$PID/fd | wc -l`.
+
 ## Long-term: миграция на XHTTP
 
 **XHTTP** — это новый транспорт в xray-core (~2024 года), идущий на замену deprecated WS и gRPC. Маскируется под обычный HTTPS-трафик (H2/H3), может работать поверх Reality.

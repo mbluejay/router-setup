@@ -590,6 +590,9 @@ generate_config() {
         "domain": ["geosite:whitelist", "geosite:category-ru", "geosite:steam", "geosite:microsoft", "geosite:apple"] },
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
+      { "type": "field", "outboundTag": "proxy-grpc", "network": "udp",
+        "ip": ["91.108.4.0/22","91.108.8.0/22","91.108.12.0/22","91.108.16.0/22","91.108.20.0/22","91.108.56.0/22","95.161.64.0/20","149.154.160.0/20","185.76.151.0/24"] },
+      { "type": "field", "outboundTag": "proxy-grpc", "network": "udp", "domain": ["geosite:telegram"] },
       { "type": "field", "outboundTag": "block",  "network": "udp", "port": "443" },
       { "type": "field", "outboundTag": "direct", "network": "udp" },
       { "type": "field", "balancerTag": "vpn-balancer", "network": "tcp,udp" }
