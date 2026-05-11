@@ -18,6 +18,7 @@ LOCK_FILE="/tmp/xray-update-vless-${USER:-unknown}.lock"
 ROUTER_IP="192.168.1.1"
 ROOT_PASSWORD=""
 VLESS_URL=""
+SERVER_DOMAIN=""   # домен сервера для TLS на L2/L3 (см. EXTRA_CARE.md)
 
 VLESS_NAME="" VLESS_UUID="" VLESS_SERVER="" VLESS_PORT=""
 VLESS_SECURITY="" VLESS_PBKEY="" VLESS_SNI="" VLESS_FP="chrome"
@@ -57,6 +58,7 @@ save_state() {
   cat > "$STATE_FILE" <<EOF
 ROUTER_IP=$(printf '%q' "$ROUTER_IP")
 VLESS_URL=$(printf '%q' "$VLESS_URL")
+SERVER_DOMAIN=$(printf '%q' "$SERVER_DOMAIN")
 EOF
 }
 
@@ -207,62 +209,42 @@ show_vless_parsed() {
 # Config generation (шаблон без custom-direct доменов — их добавит xray-add-direct)
 # ══════════════════════════════════════════════════════════════════════════
 
+# generate_config v2 — синхронизирован с install.sh generate_config.
+# Один proxy-reality (Reality+TCP+Vision) из VLESS URL + два hardcoded fallback'а:
+# proxy-ws (WS+TLS:8443) и proxy-grpc (gRPC+TLS:2053), оба на $VLESS_SERVER,
+# TLS-сертификат для них предоставляет сервер по $SERVER_DOMAIN.
 generate_config() {
   local out="$1"
-  local stream=""
-  case "$VLESS_SECURITY-$VLESS_TRANSPORT" in
-    reality-tcp)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "tcp",
-          "security": "reality",
-          "realitySettings": {
-            "serverName": "$VLESS_SNI",
-            "fingerprint": "$VLESS_FP",
-            "publicKey": "$VLESS_PBKEY",
-            "shortId": "$VLESS_SID"
-          },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    tls-ws)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "ws",
-          "security": "tls",
-          "tlsSettings": { "serverName": "$VLESS_SNI", "fingerprint": "$VLESS_FP" },
-          "wsSettings": { "path": "$VLESS_PATH", "headers": { "Host": "$VLESS_HOST" } },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    tls-grpc)
-      stream=$(cat <<EOF
-        "streamSettings": {
-          "network": "grpc",
-          "security": "tls",
-          "tlsSettings": { "serverName": "$VLESS_SNI" },
-          "grpcSettings": { "serviceName": "$VLESS_PATH" },
-          "sockopt": { "mark": 255 }
-        }
-EOF
-)
-      ;;
-    *)
-      log_err "Неподдерживаемая комбинация security=$VLESS_SECURITY transport=$VLESS_TRANSPORT"
-      return 1
-      ;;
-  esac
+
+  if [ "$VLESS_SECURITY-$VLESS_TRANSPORT" != "reality-tcp" ]; then
+    log_err "Шаблон v2 ожидает Reality+TCP для L1. Получено: security=$VLESS_SECURITY transport=$VLESS_TRANSPORT"
+    return 1
+  fi
+
+  if [ -z "$SERVER_DOMAIN" ]; then
+    log_warn "SERVER_DOMAIN пуст — L2/L3 не смогут проверить TLS-сертификат"
+    SERVER_DOMAIN="${VLESS_SERVER}"
+  fi
+
+  local grpc_service
+  grpc_service="grpc-$(echo "$SERVER_DOMAIN" | tr '.' '-')"
 
   cat > "$out" <<CFG
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
+    "access": "none",
     "error": "/var/log/xray/error.log"
+  },
+  "api": {
+    "tag": "api",
+    "services": ["StatsService", "ObservatoryService", "RoutingService"]
+  },
+  "observatory": {
+    "subjectSelector": ["proxy-"],
+    "probeURL": "https://www.gstatic.com/generate_204",
+    "probeInterval": "30s",
+    "enableConcurrency": false
   },
   "dns": {
     "servers": [
@@ -298,11 +280,25 @@ EOF
       "port": 5300,
       "protocol": "dokodemo-door",
       "settings": { "address": "8.8.8.8", "port": 53, "network": "tcp,udp" }
+    },
+    {
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" }
+    },
+    {
+      "tag": "http-local",
+      "listen": "127.0.0.1",
+      "port": 8118,
+      "protocol": "http",
+      "settings": { "timeout": 30 }
     }
   ],
   "outbounds": [
     {
-      "tag": "proxy",
+      "tag": "proxy-reality",
       "protocol": "vless",
       "settings": {
         "vnext": [{
@@ -311,7 +307,53 @@ EOF
           "users": [{ "id": "$VLESS_UUID", "flow": "$VLESS_FLOW", "encryption": "none" }]
         }]
       },
-$stream
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "$VLESS_SNI",
+          "fingerprint": "$VLESS_FP",
+          "publicKey": "$VLESS_PBKEY",
+          "shortId": "$VLESS_SID"
+        },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-ws",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "$VLESS_SERVER",
+          "port": 8443,
+          "users": [{ "id": "$VLESS_UUID", "encryption": "none" }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": { "serverName": "$SERVER_DOMAIN", "fingerprint": "chrome", "alpn": ["http/1.1"] },
+        "wsSettings": { "path": "/ws", "headers": { "Host": "$SERVER_DOMAIN" } },
+        "sockopt": { "mark": 255 }
+      }
+    },
+    {
+      "tag": "proxy-grpc",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "$VLESS_SERVER",
+          "port": 2053,
+          "users": [{ "id": "$VLESS_UUID", "encryption": "none" }]
+        }]
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": { "serverName": "$SERVER_DOMAIN", "fingerprint": "chrome", "alpn": ["h2"] },
+        "grpcSettings": { "serviceName": "$grpc_service", "multiMode": true },
+        "sockopt": { "mark": 255 }
+      }
     },
     {
       "tag": "direct",
@@ -324,7 +366,11 @@ $stream
   ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      { "tag": "vpn-balancer", "selector": ["proxy-"], "strategy": { "type": "random" } }
+    ],
     "rules": [
+      { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
       { "type": "field", "inboundTag": ["dns-in"], "outboundTag": "dns-out" },
       { "type": "field", "outboundTag": "block",  "domain": ["geosite:win-spy"] },
       { "type": "field", "outboundTag": "direct", "ip": ["geoip:private"] },
@@ -338,7 +384,7 @@ $stream
       { "type": "field", "outboundTag": "direct", "port": "6881-6889" },
       { "type": "field", "outboundTag": "direct", "network": "udp", "port": "500,1701,4500" },
       { "type": "field", "outboundTag": "block",  "network": "udp", "port": "443" },
-      { "type": "field", "outboundTag": "proxy",  "network": "tcp,udp" }
+      { "type": "field", "balancerTag": "vpn-balancer", "network": "tcp,udp" }
     ]
   }
 }
@@ -382,6 +428,9 @@ main() {
       confirm "Параметры корректны?" y && break
     fi
   done
+
+  log_step "Основной домен сервера (для TLS на L2/L3 fallback-слоях)"
+  ask "SERVER_DOMAIN" SERVER_DOMAIN
   save_state
 
   # ── 3. Generate + upload template ────────────────────────────────────
