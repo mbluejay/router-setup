@@ -23,8 +23,8 @@
 | Слой | Порт | Транспорт | Назначение |
 |---|---|---|---|
 | **L1** — основной | 443 TCP | VLESS + Reality + Vision | Базовое состояние, максимум скорости, маскировка под чужой TLS |
-| **L2** — WS-маскировка | 8443 TCP | VLESS + TLS + WebSocket `/ws` | Работает если DPI начал резать Reality по fingerprint |
-| **L3** — gRPC | 2053 TCP | VLESS + TLS + gRPC `multi/grpc-service` | Альтернативная TLS-маскировка; иногда жив когда WS режут |
+| ~~L2 — WS~~ | ~~8443 TCP~~ | ~~VLESS + WS + TLS~~ | **Отключён** — провайдер DPI режет TCP-handshake на 8443. Inbound на сервере остался, на клиенте outbound удалён. Возможно вернётся через port-sharing 443 (см. XHTTP) |
+| **L3** — gRPC | 2053 TCP | VLESS + TLS + gRPC `multi/grpc-service` | Альтернативная TLS-маскировка. Тоже подвержен DPI (TCP-fail ~20%), но в среднем работает |
 | **L4** *(опционально, потом)* | 51820 UDP | AmneziaWG | Если весь TCP-443 режут на провайдере; обходит даже UDP-блокировки |
 
 L1–L3 — это inbound'ы xray на сервере, управляются через 3x-ui.
@@ -648,6 +648,108 @@ grep -oE 'proxy-[a-z]+' /var/log/xray/access.log \
 **Результат**: xray RSS упал со **118MB до 28MB**, available RAM с 9MB до 99MB. Запас 70+MB на пиковые ситуации.
 
 **Если когда-нибудь захочется access.log обратно** (например для статистики или диагностики): вернуть `"access": "/var/log/xray/access.log"`, но следить за `free` через `Diagnostics → free`. На AX3000T с 256MB total — на грани.
+
+### Инцидент: L2 (WS) выключен из-за DPI на нестандартных портах (2026-05-11)
+
+**Наблюдение**: error.log забивался i/o timeout'ами на <<VLESS_SERVER>>:8443 десятки раз в минуту. Тест прямого TCP-connect с роутера на разные порты сервера:
+
+| Порт | Замер 1 | Замер 2 | Замер 3 |
+|---|---|---|---|
+| 443 (Reality) | 85ms | 78ms | 73ms |
+| 8443 (WS) | **2164ms** | **1136ms** | 82ms |
+| 2053 (gRPC) | **fail** | 72ms | 68ms |
+
+**Диагноз**: провайдер Сида (RU) делает DPI на нестандартных TLS-портах. 443 проходит мгновенно, 8443/2053 периодически дропает SYN на TCP-уровне (видимо rate-limit или selective-drop). Reality на 443 имитирует обычный HTTPS — не подозрителен.
+
+**Решение (tactical)**: удалить `proxy-ws` outbound из конфига роутера. Inbound на сервере (8443) остался слушать — может пригодиться при ручном тесте через `bo`. Balancer теперь selects из `proxy-reality` + `proxy-grpc`. gRPC тоже подвержен DPI (~20% fail), но работает в среднем.
+
+**Решение (long-term)**: миграция на **XHTTP** (см. ниже) — позволяет упаковать все слои в один порт 443.
+
+## Long-term: миграция на XHTTP
+
+**XHTTP** — это новый транспорт в xray-core (~2024 года), идущий на замену deprecated WS и gRPC. Маскируется под обычный HTTPS-трафик (H2/H3), может работать поверх Reality.
+
+### Почему XHTTP лучше WS/gRPC
+
+- **Тот же порт 443** — никаких нестандартных портов, DPI не за что зацепиться.
+- **Совместимо с Reality** — handshake выглядит как настоящий TLS к легитимному сайту.
+- **HTTP/2 и HTTP/3 (QUIC)** — `mode: "auto"` выбирает между ними. H3/QUIC обходит даже throttling TCP.
+- **Active maintenance** — основной фокус разработчиков xray, в отличие от WS/gRPC.
+- **Меньше overhead** — не нужны заголовки Upgrade/WebSocket-frames.
+
+### Как будет выглядеть архитектура с XHTTP
+
+**На сервере (3x-ui)**:
+
+VLESS+Reality inbound на 443 остаётся как есть. К нему добавляется `realitySettings.fallbacks`:
+
+```jsonc
+"realitySettings": {
+  "serverName": "www.apple.com",
+  ...
+  "fallbacks": [
+    { "alpn": "h2",       "dest": "127.0.0.1:8001" },
+    { "alpn": "http/1.1", "dest": "127.0.0.1:8002" }
+  ]
+}
+```
+
+`fallbacks` — это магия Reality: если клиент **не** прошёл Reality-handshake (это либо реальный браузер ходящий на www.apple.com, либо наш XHTTP-клиент), его трафик отдаётся на backend.
+
+Поднимаем VLESS+XHTTP inbound на 127.0.0.1:8001:
+
+```jsonc
+{
+  "tag": "fallback-xhttp",
+  "listen": "127.0.0.1",
+  "port": 8001,
+  "protocol": "vless",
+  "settings": { "clients": [{ "id": "<UUID>" }], "decryption": "none" },
+  "streamSettings": {
+    "network": "xhttp",
+    "xhttpSettings": { "path": "/xhttp", "mode": "auto" }
+  }
+}
+```
+
+**На клиенте (роутере)**:
+
+Outbound `proxy-xhttp` на <<VLESS_SERVER>>:443 с network=xhttp, без Reality-handshake (или с Reality, но это уже L1). Идёт **на тот же 443**.
+
+### Что это даёт нам в практике
+
+- **L1 Reality** работает как сейчас (для xray-клиентов с поддержкой Reality).
+- **L2/L3 объединены в один XHTTP**-outbound на том же 443. Если Reality на каком-то клиенте начнёт глючить — клиент переключается на XHTTP. Трафик от L2/L3 для DPI выглядит как обычный HTTPS-h2/h3 к легитимному сайту через тот же 443.
+- Все слои на одном порту — DPI **не может различить** их по `port`.
+
+### Что нужно сделать для миграции
+
+1. **На сервере** (через 3x-ui):
+   - Обновить L1 inbound на 443: добавить `realitySettings.fallbacks` указывающие на 127.0.0.1:8001.
+   - Создать новый inbound на 127.0.0.1:8001 — VLESS+XHTTP.
+   - Удалить inbound'ы L2 (8443) и L3 (2053) — больше не нужны.
+   - **Тест**: с локального хоста `curl -sk https://<<SERVER_DOMAIN>>:443/xhttp` — должен ответить (через fallback в xray-backend).
+2. **На роутере** (через `update-vless.sh` или вручную):
+   - Заменить `proxy-grpc` outbound на `proxy-xhttp` (network=xhttp, server=<<VLESS_SERVER>>:443, тот же UUID).
+   - Удалить `proxy-ws` outbound полностью.
+   - Reality остаётся как `proxy-reality` (L1).
+3. **Тестировать**:
+   - Bесь balancer selector "proxy-" будет иметь 2 outbound — `proxy-reality` и `proxy-xhttp`, оба на 443.
+   - Latency должна быть одинаковой (тот же 443), но XHTTP работает даже если Reality fingerprint клиента изменится.
+
+### Подводные камни
+
+- **3x-ui панель** — UI для xhttp может быть неполный, придётся править через API или JSON.
+- **xray-core версия** — нужен ≥1.8.10 (у нас 26.3.27 — годится).
+- **fallbacks** работают только если Reality `target/dest` это **TLS-сайт** (www.apple.com:443 — да, TLS). Не любой backend.
+- **Один UUID** на Reality + XHTTP — нужно убедиться что 3x-ui это разрешает или использовать дублированный UUID.
+- **Сложно тестировать руками** — XHTTP через CONNECT-туннель сложно проверить простым curl'ом, нужен полноценный xray-клиент.
+
+### Что я предлагаю
+
+Сделать XHTTP-миграцию **отдельной сессией**, не сегодня. Сегодня у нас рабочий L1 Reality + L3 gRPC (gRPC нестабилен, но работает в среднем). Это достаточно стабильно для повседневной работы.
+
+Когда дойдут руки до миграции — обновлю `server-install.sh` (добавить действие `migrate-to-xhttp`) и `install.sh` (новый outbound в `generate_config`).
 
 ### Команды для Сида
 

@@ -320,24 +320,6 @@ generate_config() {
       }
     },
     {
-      "tag": "proxy-ws",
-      "protocol": "vless",
-      "settings": {
-        "vnext": [{
-          "address": "$VLESS_SERVER",
-          "port": 8443,
-          "users": [{ "id": "$VLESS_UUID", "encryption": "none" }]
-        }]
-      },
-      "streamSettings": {
-        "network": "ws",
-        "security": "tls",
-        "tlsSettings": { "serverName": "$SERVER_DOMAIN", "fingerprint": "chrome", "alpn": ["http/1.1"] },
-        "wsSettings": { "path": "/ws", "headers": { "Host": "$SERVER_DOMAIN" } },
-        "sockopt": { "mark": 255 }
-      }
-    },
-    {
       "tag": "proxy-grpc",
       "protocol": "vless",
       "settings": {
