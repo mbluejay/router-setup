@@ -649,6 +649,45 @@ grep -oE 'proxy-[a-z]+' /var/log/xray/access.log \
 
 **Если когда-нибудь захочется access.log обратно** (например для статистики или диагностики): вернуть `"access": "/var/log/xray/access.log"`, но следить за `free` через `Diagnostics → free`. На AX3000T с 256MB total — на грани.
 
+### Инцидент: Discord / qBittorrent / UDP не работали (2026-05-11)
+
+**Симптомы**: Discord voice отваливался, qBittorrent не качал.
+
+**Причины (две)**:
+1. **VLESS+Reality+Vision не поддерживает UDP** — Vision это TCP-only flow. UDP через xudp (UDP-in-TCP инкапсуляция) теряет пакеты. Discord voice / DHT / WebRTC / игры ломались.
+2. **qBittorrent listening port у Сида = 58516**, не входит в наш направую-rule `port: "6881-6889"`. TCP-коннекты к peer'ам шли через VPN → latency.
+
+**Решение**:
+- Добавлено правило routing `outboundTag: direct, network: udp` (после QUIC-block). Весь UDP теперь идёт прямо через WAN. QUIC:443 всё ещё block (защита от утечек HTTPS-H3).
+- На конкретно Сидовском роутере расширено `port: "6881-6889,58516"` для TCP-direct.
+
+**Документация для шаблона**: в `config.json.template` оставлено стандартное `6881-6889`. Если у пользователя qBittorrent на другом порту — нужно вручную добавить в правило через `xray-add-direct` (хотя сейчас это для domain'ов, не для портов — нужно править config.json напрямую).
+
+### Инцидент: CGNAT провайдера блокирует incoming peer-коннекты (2026-05-11)
+
+**Симптом**: qBittorrent работает только outgoing, incoming пиры не достукиваются → "connectable=NO".
+
+**Диагноз**: с публичного хоста (<<SERVER_DOMAIN>>) curl-test:
+```
+curl http://<<HOME_ISP_IP>>:58516/ → HTTP=000 timeout
+ping <<HOME_ISP_IP>> → 100% packet loss
+```
+
+WAN-адрес AX3000T = `192.168.1.65` (за upstream-роутером). Внешний IP `<<HOME_ISP_IP>>` принадлежит провайдеру (CGNAT). Port forwarding на AX3000T (настроен) и любой forward на upstream не пробьют CGNAT.
+
+**Что не помогло бы**:
+- Port forwarding на AX3000T → upstream (192.168.1.254) → провайдер: каждый уровень NAT блокирует свой.
+- UPnP-IGD: даже если бы все уровни поддерживали — CGNAT-уровень провайдера не пробивается через UPnP.
+
+**Варианты решения**:
+
+1. **Принять как есть** — outgoing-only, скорость ниже но скачка работает.
+2. **Купить публичный IP у провайдера** — обычно платная услуга 100-200₽/мес.
+3. **WireGuard-туннель к <<SERVER_DOMAIN>> с port forwarding** — на сервере поднимаем wireguard, выдаём AX3000T статический IP внутри туннеля (например 10.66.66.2). На сервере nat-rule: `iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 58516 -j DNAT --to-destination 10.66.66.2:58516`. Все incoming на <<VLESS_SERVER>>:58516 будут прозрачно проксироваться к qBittorrent.
+4. **IPv6** — если провайдер выдаёт `/64` IPv6-префикс через DHCPv6/PD, у каждого клиента LAN свой публичный IPv6. Большинство торрент-клиентов поддерживают IPv6. **Но сейчас IPv6 на роутере отключён** (см. CLAUDE.md `feature_ipv6_install`). Можно включить только для конкретного клиента.
+
+**Вариант 3 (WireGuard для BT-incoming)** — отдельная задача, не сегодня. План написать когда дойдёт.
+
 ### Инцидент: L2 (WS) выключен из-за DPI на нестандартных портах (2026-05-11)
 
 **Наблюдение**: error.log забивался i/o timeout'ами на <<VLESS_SERVER>>:8443 десятки раз в минуту. Тест прямого TCP-connect с роутера на разные порты сервера:
