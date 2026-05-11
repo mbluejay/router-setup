@@ -765,34 +765,255 @@ free
 #    swapon /dev/zram0 >/dev/null 2>&1
 ```
 
-### Что нужно сделать для миграции (на XHTTP)
+### Детальный план миграции (вариант 1+3 — план без выполнения)
 
-1. **На сервере** (через 3x-ui):
-   - Обновить L1 inbound на 443: добавить `realitySettings.fallbacks` указывающие на 127.0.0.1:8001.
-   - Создать новый inbound на 127.0.0.1:8001 — VLESS+XHTTP.
-   - Удалить inbound'ы L2 (8443) и L3 (2053) — больше не нужны.
-   - **Тест**: с локального хоста `curl -sk https://<<SERVER_DOMAIN>>:443/xhttp` — должен ответить (через fallback в xray-backend).
-2. **На роутере** (через `update-vless.sh` или вручную):
-   - Заменить `proxy-grpc` outbound на `proxy-xhttp` (network=xhttp, server=<<VLESS_SERVER>>:443, тот же UUID).
-   - Удалить `proxy-ws` outbound полностью.
-   - Reality остаётся как `proxy-reality` (L1).
-3. **Тестировать**:
-   - Bесь balancer selector "proxy-" будет иметь 2 outbound — `proxy-reality` и `proxy-xhttp`, оба на 443.
-   - Latency должна быть одинаковой (тот же 443), но XHTTP работает даже если Reality fingerprint клиента изменится.
+#### Архитектурная схема
 
-### Подводные камни
+```
+Клиентский трафик с роутера
+   ↓ TProxy → xray → balancer-random → один из 2 живых outbound:
+   ├── proxy-reality  ─── TLS+Reality SNI=www.apple.com ──┐
+   └── proxy-xhttp    ─── TLS+XHTTP    SNI=<<SERVER_DOMAIN>>     │
+                                                          ↓
+                              <<VLESS_SERVER>>:443 (xray VLESS+Reality inbound)
+                                  ↓
+                                  Reality смотрит ClientHello:
+                                  ├ Reality fingerprint валиден → VLESS proxy (L1)
+                                  ├ SNI = apple.com (target)    → forward к www.apple.com:443
+                                  └ ALPN = h2 / другой SNI      → fallback в 127.0.0.1:8001
+                                                                       ↓
+                                                                  127.0.0.1:8001
+                                                                  (xray VLESS+XHTTP inbound с TLS)
+                                                                       ↓ VLESS proxy (L2)
+```
 
-- **3x-ui панель** — UI для xhttp может быть неполный, придётся править через API или JSON.
-- **xray-core версия** — нужен ≥1.8.10 (у нас 26.3.27 — годится).
-- **fallbacks** работают только если Reality `target/dest` это **TLS-сайт** (www.apple.com:443 — да, TLS). Не любой backend.
-- **Один UUID** на Reality + XHTTP — нужно убедиться что 3x-ui это разрешает или использовать дублированный UUID.
-- **Сложно тестировать руками** — XHTTP через CONNECT-туннель сложно проверить простым curl'ом, нужен полноценный xray-клиент.
+**Ключевое**: оба клиентских outbound идут на один порт 443. DPI видит обычный HTTPS на 443. Никаких нестандартных портов.
 
-### Что я предлагаю
+#### Шаг S1 (сервер) — снапшот перед началом
 
-Сделать XHTTP-миграцию **отдельной сессией**, не сегодня. Сегодня у нас рабочий L1 Reality + L3 gRPC (gRPC нестабилен, но работает в среднем). Это достаточно стабильно для повседневной работы.
+```bash
+ssh root@<SERVER> "
+  cp /etc/x-ui/x-ui.db /etc/x-ui/x-ui.db.bak-pre-xhttp-\$(date +%F-%H%M)
+  cp /usr/local/x-ui/bin/config.json /usr/local/x-ui/bin/config.json.bak-pre-xhttp
+  ls -la /etc/x-ui/x-ui.db.bak-* /usr/local/x-ui/bin/config.json.bak-*
+"
+```
 
-Когда дойдут руки до миграции — обновлю `server-install.sh` (добавить действие `migrate-to-xhttp`) и `install.sh` (новый outbound в `generate_config`).
+#### Шаг S2 (сервер) — создать новый внутренний XHTTP inbound на 127.0.0.1:8001
+
+Через 3x-ui API:
+
+```bash
+URL="https://<IP>:<PORT>/<webBasePath>"
+COOKIE=/tmp/cookie.txt
+curl -sk -c $COOKIE -X POST "$URL/login" -d "username=<U>&password=<P>"
+
+UUID="<тот же что у L1>"
+CERT="/root/cert/<SERVER_DOMAIN>/fullchain.pem"
+KEY="/root/cert/<SERVER_DOMAIN>/privkey.pem"
+
+SETTINGS='{"clients":[{"id":"'$UUID'","flow":"","email":"fallback-xhttp","enable":true,"comment":"L2 XHTTP backend for Reality fallback","reset":0}],"decryption":"none"}'
+
+STREAM='{"network":"xhttp","security":"tls","externalProxy":[],"tlsSettings":{"serverName":"<SERVER_DOMAIN>","minVersion":"1.2","maxVersion":"1.3","alpn":["h2"],"settings":{"allowInsecure":false,"fingerprint":""},"certificates":[{"certificateFile":"'$CERT'","keyFile":"'$KEY'","ocspStapling":3600,"oneTimeLoading":false,"usage":"encipherment","buildChain":false}]},"xhttpSettings":{"path":"/xhttp","mode":"auto","host":""}}'
+
+SNIFF='{"enabled":false,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}'
+
+curl -sk -b $COOKIE -X POST "$URL/panel/api/inbounds/add" \
+  --data-urlencode "up=0" --data-urlencode "down=0" --data-urlencode "total=0" \
+  --data-urlencode "remark=fallback-L2-xhttp" --data-urlencode "enable=true" \
+  --data-urlencode "expiryTime=0" \
+  --data-urlencode "listen=127.0.0.1" \
+  --data-urlencode "port=8001" --data-urlencode "protocol=vless" \
+  --data-urlencode "settings=$SETTINGS" \
+  --data-urlencode "streamSettings=$STREAM" \
+  --data-urlencode "sniffing=$SNIFF"
+```
+
+**Проверка**: после `x-ui restart` запросить `netstat -tlnp | grep 8001` — должен слушать xray на 127.0.0.1:8001.
+
+Прямой тест с самого сервера (не через Reality):
+```bash
+ssh root@<SERVER> "curl -sk --max-time 5 https://127.0.0.1:8001/xhttp \
+  --resolve <SERVER_DOMAIN>:8001:127.0.0.1 -H 'Host: <SERVER_DOMAIN>'"
+# Должен вернуть TLS handshake OK (тело может быть пустое — это XHTTP протокол, не браузер)
+```
+
+#### Шаг S3 (сервер) — обновить L1 Reality с `fallbacks`
+
+**Самая опасная операция всей миграции.** Можно сломать L1.
+
+3x-ui API endpoint: `POST /panel/api/inbounds/update/{id}`. Нужно отправить **полный** объект inbound (id=1 для нашего L1).
+
+Алгоритм:
+1. Получить текущий L1: `GET /panel/api/inbounds/get/1`. Сохранить ответ.
+2. Распарсить `streamSettings` JSON.
+3. В `streamSettings.realitySettings` добавить:
+   ```jsonc
+   "fallbacks": [
+     { "alpn": "h2", "dest": "127.0.0.1:8001" }
+   ]
+   ```
+4. Сериализовать обратно и отправить через update.
+
+```bash
+curl -sk -b $COOKIE "$URL/panel/api/inbounds/get/1" > /tmp/l1.json
+
+# Парсинг и правка через jq:
+jq '
+  .streamSettings |= (
+    fromjson
+    | .realitySettings.fallbacks = [{"alpn":"h2","dest":"127.0.0.1:8001"}]
+    | tostring
+  )
+' /tmp/l1.json > /tmp/l1-patched.json
+
+# Извлечь поля и отправить через update (form-data)
+ID=$(jq -r '.obj.id' /tmp/l1-patched.json)
+curl -sk -b $COOKIE -X POST "$URL/panel/api/inbounds/update/$ID" \
+  --data-urlencode "up=$(jq -r '.obj.up' /tmp/l1-patched.json)" \
+  --data-urlencode "down=$(jq -r '.obj.down' /tmp/l1-patched.json)" \
+  ... # все поля inbound
+```
+
+**Альтернатива**: создать **второй** Reality inbound на каком-нибудь другом порту (например 8443 — он сейчас занят отключённым L2, его надо сначала удалить через API; или 8444) с теми же параметрами но уже **с fallbacks**. Тестировать через override `bo` на роутере. Если работает — переключить L1 на этот вариант (удалить старый L1, текущий тестовый стать L1 на 443). **Это и есть «вариант 2» (тестовый накат)**.
+
+**Тест L1 после правки**:
+- На клиенте через override: `xray api bo --server=127.0.0.1:10085 -b vpn-balancer proxy-reality`.
+- `curl -sk --max-time 8 --proxy http://127.0.0.1:8118 https://httpbin.org/ip` — должен вернуть `<<VLESS_SERVER>>`.
+
+**Откат если L1 сломался**:
+```bash
+ssh root@<SERVER> "
+  /usr/local/x-ui/x-ui stop
+  cp /etc/x-ui/x-ui.db.bak-pre-xhttp-<TS> /etc/x-ui/x-ui.db
+  /usr/local/x-ui/x-ui start
+"
+```
+
+#### Шаг S4 (сервер) — удалить L2 WS (id=4) и L3 gRPC (id=5)
+
+```bash
+curl -sk -b $COOKIE -X POST "$URL/panel/api/inbounds/del/4"   # L2 WS
+curl -sk -b $COOKIE -X POST "$URL/panel/api/inbounds/del/5"   # L3 gRPC
+```
+
+После этого: только `inbound id=1 (Reality+fallbacks на 443)` и `inbound id=N (XHTTP на 127.0.0.1:8001)`.
+
+#### Шаг C1 (клиент) — обновить config.json.template и install.sh
+
+В `config.json.template` и `install.sh:generate_config` заменить блок `proxy-grpc` на `proxy-xhttp`:
+
+```jsonc
+{
+  "tag": "proxy-xhttp",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [{
+      "address": "<<VLESS_SERVER>>",
+      "port": 443,
+      "users": [{ "id": "<<VLESS_UUID>>", "encryption": "none" }]
+    }]
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "tls",
+    "tlsSettings": {
+      "serverName": "<<SERVER_DOMAIN>>",
+      "fingerprint": "chrome",
+      "alpn": ["h2"]
+    },
+    "xhttpSettings": {
+      "path": "/xhttp",
+      "mode": "auto",
+      "host": "<<SERVER_DOMAIN>>"
+    },
+    "sockopt": { "mark": 255 }
+  }
+}
+```
+
+`proxy-reality` не трогаем — он остаётся как L1.
+
+#### Шаг C2 (клиент) — применить новый config через `apply_config_with_rollback`
+
+```bash
+# В новой сессии install.sh:
+# 1. Generate v3 config с proxy-xhttp вместо proxy-grpc
+# 2. scp /usr/local/etc/xray/config.json.new
+# 3. apply_config_with_rollback (5-минутный watchdog откатит если что)
+```
+
+**Проверка после применения**:
+
+```bash
+# Балансер видит 2 outbound
+ssh root@192.168.2.1 "/usr/local/bin/xray api bi --server=127.0.0.1:10085 vpn-balancer"
+# Должно показать: proxy-reality, proxy-xhttp
+
+# Тест каждого слоя через override:
+for tag in proxy-reality proxy-xhttp; do
+  ssh root@192.168.2.1 "/usr/local/bin/xray api bo --server=127.0.0.1:10085 -b vpn-balancer $tag"
+  sleep 2
+  ssh root@192.168.2.1 "curl -sk --max-time 8 --proxy http://127.0.0.1:8118 https://httpbin.org/ip"
+done
+ssh root@192.168.2.1 "/usr/local/bin/xray api bo --server=127.0.0.1:10085 -b vpn-balancer -r"
+```
+
+Оба должны вернуть `<<VLESS_SERVER>>`. Если xhttp возвращает пустое или ошибку — проверить error.log на роутере и на сервере (path mismatch, ALPN mismatch, cert mismatch).
+
+#### Шаг C3 (клиент) — обновить шаблон на роутере и в репо
+
+После успешного теста: те же правки в `update-vless.sh:generate_config`, коммит.
+
+#### Edge-cases и риски
+
+1. **3x-ui перегенерит config.json при `restart`** — если SQLite-данные inbound некорректны, xray не стартует, x-ui-3 показывает ошибку в UI. На роутере и сервере одновременно потеряем VPN. Митигация: **снапшот x-ui.db перед каждой правкой**, восстановление в случае ошибки.
+
+2. **fallbacks работают только в Reality** — но Reality сам по себе работает только когда target сайт реально жив (`www.apple.com:443`). Если apple.com упадёт → весь L1 → L2 fallback тоже сломается. Митигация: **mode `random` в balancer'е** уже выберет live outbound, а если оба зависят от 443 (а они в новой схеме оба зависят) — мы теряем VPN при недоступности 443 на сервере.
+
+3. **mode: "auto" в xhttpSettings** — клиент пробует H3 (QUIC), если не получается — H2. Но QUIC это UDP/443, который у нас сейчас **блокируется правилом** `{"outboundTag": "block", "network": "udp", "port": "443"}` (см. config.json). То есть QUIC через VPN не пройдёт. Митигация: либо убрать QUIC-block (но он защищает от утечек), либо явно прописать `mode: "stream-up"` (только H2/TCP). **Решение — `mode: "stream-up"`** в client xhttpSettings.
+
+4. **path mismatch** — если на сервере `/xhttp`, на клиенте `/xhttp` — сходится. Если на клиенте `/xhttp/` (со слешем) — fail. **Точное совпадение**, проверять.
+
+5. **3x-ui панель может не поддерживать `xhttpSettings` в UI** — некоторые версии 3x-ui не имеют формы для XHTTP. Только через API/SQL. Это значит после миграции Сид **не сможет править XHTTP-inbound через UI**, придётся обращаться к API или прямой SQL.
+
+6. **xray-core 26.3.27 поддерживает XHTTP** (проверено `xray help`), но edge-cases у конкретных версий бывают. Если что — обновить xray до latest.
+
+#### Откат целиком к gRPC
+
+Если миграция полностью провалится:
+
+```bash
+# На сервере: откатить x-ui.db к снапшоту
+ssh root@<SERVER> "x-ui stop && cp /etc/x-ui/x-ui.db.bak-pre-xhttp-<TS> /etc/x-ui/x-ui.db && x-ui start"
+
+# На роутере: откатить config.json к pre-xhttp бэкапу
+ssh root@192.168.2.1 "cp /usr/local/etc/xray/config.json.bak-pre-xhttp /usr/local/etc/xray/config.json && /etc/init.d/xray restart"
+```
+
+`apply_config_with_rollback` это сделает автоматически если health-check fail.
+
+#### Что обновлять в репо после успешной миграции
+
+| Файл | Изменение |
+|---|---|
+| `config.json.template` | proxy-grpc → proxy-xhttp, добавить mode: "stream-up" |
+| `install.sh:generate_config` | то же |
+| `update-vless.sh:generate_config` | то же |
+| `server-install.sh` | новая action `migrate-to-xhttp` (создать XHTTP inbound, обновить L1 с fallbacks, удалить L2/L3) |
+| `EXTRA_CARE.md` | пометить миграцию как выполненную |
+| `README.md` | архитектура с одним портом 443 |
+
+#### Проверочный чеклист перед началом миграции
+
+- [ ] x-ui.db снапшот на сервере (свежий).
+- [ ] config.json снапшот на роутере (свежий).
+- [ ] Все 3 outbound (reality/grpc/ws) задокументированы в state.env.
+- [ ] Серверный LE-сертификат на `<SERVER_DOMAIN>` валиден.
+- [ ] `curl` есть на роутере (нужен для `apply_config_with_rollback`).
+- [ ] TG-watchdog работает (для уведомлений о падении).
+- [ ] Сид не на VPN-критичной задаче (стрим/VOIP/RDP).
+- [ ] Время есть на откат если что (20-30 минут).
 
 ### Команды для Сида
 
