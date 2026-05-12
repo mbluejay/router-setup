@@ -1,15 +1,19 @@
 #!/bin/sh /etc/rc.common
 #
-# zram-swap — compressed RAM swap. Даёт ~50-70MB эффективной памяти
-# на роутере с 256MB total за счёт сжатия (lzo-rle ~2x).
+# zram-swap — compressed RAM swap. Даёт ~80-150MB эффективной памяти
+# на роутере с 256MB total за счёт сжатия (lzo-rle ~2-3x).
 #
 # START=10 — раньше большинства сервисов, чтобы xray уже стартовал с активным
 # swap'ом и мог сбрасывать туда холодные страницы при пике.
+#
+# disksize — это потолок, не резерв: пустой zram занимает ~0 RAM, память
+# выделяется только под реально засвопленные (и сжатые) страницы. 256M даёт
+# подушку на нагрузочные пики xray (много соединений → раздувание буферов).
 
 START=10
 STOP=99
 
-ZRAM_SIZE="${ZRAM_SIZE:-128M}"
+ZRAM_SIZE="${ZRAM_SIZE:-256M}"
 ZRAM_ALGO="${ZRAM_ALGO:-lzo-rle}"
 ZRAM_PRIO="${ZRAM_PRIO:-100}"
 
