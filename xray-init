@@ -10,7 +10,12 @@ start_service() {
     /usr/local/bin/xray-tproxy-setup.sh
     procd_open_instance
     procd_set_param command $PROG run -c $CONFIG
-    procd_set_param env XRAY_LOCATION_ASSET=/usr/local/etc/xray
+    # GOMEMLIMIT — мягкий потолок Go-heap. На 239MB-роутере xray под нагрузкой
+    # раздувался до 108MB (Go не отдаёт освобождённую память ОС), оставляя ~17MB
+    # запаса → memory-thrash → зависания/ребуты. GOMEMLIMIT заставляет GC работать
+    # активнее у границы. Это soft-limit: процесс не падает, в крайнем случае чуть
+    # больше CPU на GC. GOGC не трогаем — GOMEMLIMIT делает всю работу.
+    procd_set_param env XRAY_LOCATION_ASSET=/usr/local/etc/xray GOMEMLIMIT=96MiB
     procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -30,6 +35,11 @@ start_service() {
             fi
         done
     ) &
+
+    # Self-heal: через 50с после старта проверяем, ходит ли VPN. Если нет и
+    # активный конфиг отличается от /root/xray-config.safe.json — откат на .safe
+    # + рестарт. Так ребут/рестарт со сломанным конфигом сам себя чинит за ~1 мин.
+    [ -x /usr/local/bin/xray-selfheal.sh ] && ( sleep 50; /usr/local/bin/xray-selfheal.sh ) &
 }
 
 stop_service() {
