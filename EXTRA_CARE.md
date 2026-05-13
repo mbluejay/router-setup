@@ -778,6 +778,17 @@ cat /proc/$PID/limits | grep 'open files'
 
 ## Long-term: миграция на XHTTP
 
+> **Актуальный runbook:** [`MIGRATION-XHTTP.md`](MIGRATION-XHTTP.md) — пошаговая
+> инструкция с rollback на каждом шаге, два пути (параллельный outbound на :2087
+> или Reality fallbacks на :443), pre-flight checklist, грабли из прошлых
+> попыток. Утилиты: `xray-apply-config.sh` (безопасный деплой конфига с
+> auto-rollback в /root/), `xray-test-xhttp-isolated.sh` (изолированный тест
+> XHTTP-клиента без касания прода).
+>
+> Текст ниже — историческое обоснование и архитектурные детали, оставлено для
+> контекста.
+
+
 **XHTTP** — это новый транспорт в xray-core (~2024 года), идущий на замену deprecated WS и gRPC. Маскируется под обычный HTTPS-трафик (H2/H3), может работать поверх Reality.
 
 ### Почему XHTTP лучше WS/gRPC
