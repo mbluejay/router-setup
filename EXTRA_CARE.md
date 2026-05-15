@@ -797,6 +797,51 @@ cat /proc/$PID/limits | grep 'open files'
 
 **Урок навсегда**: **api-based проверки ненадёжны**. Любой watchdog, который ходит через внутренние интерфейсы того же процесса что мониторит, в принципе может попасть в петлю «процесс деградировал, api возвращает мусор, watchdog не видит проблему». Единственный надёжный health-check — **end-to-end**: попробовать пройти весь путь так же как пользователь (curl наружу через прокси).
 
+### Инцидент: DNS через CloudFlare DoH ломал скорость (2026-05-15)
+
+**Симптом**: страницы (госуслуги, github, ютуб) грузились по 3-15 секунд. Сам HTTPS-connect был быстрый (~100ms), но DNS-резолв висел.
+
+**Корень**: в `dns.servers[]` первым стоял `https://1.1.1.1/dns-query` (DoH CloudFlare) **без `domains:` фильтра** — т.е. фактически он был catch-all для всех доменов не попавших в более узкие правила. Запрос на 1.1.1.1 не в `geoip:ru` → routing шлёт через `vpn-balancer` → VLESS → mordepy.ru → CF → обратно через тунель. Физически длинный путь + CF деградирован QoS'ом со стороны RU ISP к Cloudflare. error.log пестрел `context deadline exceeded` на десятках доменов. Каждая страница на 5-10 субдоменах накапливала **5-50 секунд** только на DNS.
+
+**Бенчмарк (на моей сети):**
+
+| Сервер | Ping | UDP 53 от ISP | Через VPN? |
+|---|---|---|---|
+| 77.88.8.8 (Yandex) | **7 ms** | ✅ | нет (geoip:ru → direct) |
+| 8.8.8.8 (Google) | 17 ms | ✅ | да (если не force direct) |
+| 1.1.1.1 (Cloudflare DoH) | 28 ms | — | да, тормозит (200-8000ms) |
+
+Миф «8.8.8.8 заблокирован в РФ» **не подтвердился** при прямом тесте — пингуется быстрее CF, UDP 53 отвечает корректно.
+
+Проверили также что **Yandex DNS не подсовывает RKN-IP** для блокированных доменов: rutracker.org, xhamster.com, pornhub.com, facebook.com, instagram.com, x.com — все вернули реальные Cloudflare/Facebook IP (24 домена в бенчмарке).
+
+**Фикс** (новый порядок `dns.servers[]`):
+1. **CloudFlare DoH** — только для явного «параноидального» списка x.com/twitter/themoviedb (через VPN, медленно, но кешируется).
+2. **Yandex 77.88.8.8** — primary catch-all (7ms RTT, direct outbound через geoip:ru).
+3. **Yandex 77.88.8.1** — backup.
+4. **Google 8.8.8.8 / 8.8.4.4** — fallback при отказе Yandex. С добавленным routing-rule `ip:["8.8.8.8","8.8.4.4"] → direct` чтобы тоже мимо VPN.
+
+Результат: lookup time упал с 200-8000ms до <1ms (dnsmasq cache на роутере), error.log чист.
+
+### Инцидент: proxy-reality деградирован, balancer.random половину пускал в дохлую дыру (2026-05-15)
+
+**Симптом**: даже после DNS-фикса часть хостов (api.telegram, chatgpt, github) случайно таймили 8-12s, разные в каждом тесте. Сначала подумал на флап balancer'а.
+
+**Реальность**: balancer работал штатно (random между proxy-reality и proxy-grpc), но **сам `proxy-reality` сейчас деградирован** (РКН/DPI бьёт по Reality на 443 или сервер mordepy.ru на этом пути нестабилен). Когда random попадал на reality — таймаут; когда на grpc — 0.2-0.7s. Из-за 50/50 распределения казалось «всё тормозит непредсказуемо».
+
+Диагностика — pin balancer'а через `xray api bo`:
+- `xray api bo -b vpn-balancer proxy-reality` → большинство хостов таймит → reality дохлый
+- `xray api bo -b vpn-balancer proxy-grpc` → все хосты <1s → grpc здоров
+- `xray api bo -b vpn-balancer -r proxy-grpc` — снять override
+
+**Фикс**: `balancer.selector` поменян с `["proxy-"]` на `["proxy-grpc"]`. xray больше не использует reality в пуле (observatory всё ещё пингует — он остаётся в outbounds, но balancer не выбирает). Когда reality оживёт (или поменяем настройки Reality на сервере) — вернём selector на `["proxy-"]`.
+
+**Уроки**:
+1. **`Selecting Override: 1` (пусто) в `xray api bi` = НЕТ override**, "1" это просто номер колонки. `Selecting Override: 1 proxy-X` = override стоит. Не путать.
+2. **`xray api bo` БЕЗ `-r` УСТАНАВЛИВАЕТ override**, а не показывает. Не дёргать просто так — может прибить балансер к плохому outbound'у молча.
+3. **Когда balancer flapпрет**, прежде чем грешить на random — пин каждый outbound по очереди и сравни. Если один outbound стабильно работает, другой стабильно дохлый — это не балансер, это outbound.
+4. Долгосрочно: если Reality на 443 деградирует надолго, мигрировать на XHTTP (см. [MIGRATION-XHTTP.md](MIGRATION-XHTTP.md)) — Reality fallbacks мультиплексируют на тот же 443 без светящегося gRPC-порта.
+
 ## Long-term: миграция на XHTTP
 
 > **Актуальный runbook:** [`MIGRATION-XHTTP.md`](MIGRATION-XHTTP.md) — пошаговая

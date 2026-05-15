@@ -473,15 +473,10 @@ generate_config() {
           "domain:tmdb.org"
         ]
       },
-      {
-        "address": "77.88.8.8",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
-      },
-      {
-        "address": "77.88.8.1",
-        "domains": ["geosite:category-ru", "geosite:whitelist", "geosite:steam", "geosite:microsoft", "geosite:apple"]
-      },
-      "8.8.8.8"
+      "77.88.8.8",
+      "77.88.8.1",
+      "8.8.8.8",
+      "8.8.4.4"
     ]
   },
   "inbounds": [
@@ -580,6 +575,7 @@ generate_config() {
       { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" },
       { "type": "field", "inboundTag": ["dns-in"], "outboundTag": "dns-out" },
       { "type": "field", "outboundTag": "block", "domain": ["geosite:win-spy"] },
+      { "type": "field", "outboundTag": "direct", "ip": ["8.8.8.8", "8.8.4.4"] },
       { "type": "field", "outboundTag": "direct", "ip": ["geoip:private"] },
       { "type": "field", "outboundTag": "direct", "ip": ["geoip:ru"] },
       { "type": "field", "outboundTag": "direct",
