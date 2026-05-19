@@ -1227,3 +1227,123 @@ ssh root@192.168.2.1 "cp /usr/local/etc/xray/config.json.bak-rollback /usr/local
 4. Обновить `public/README.md` — новая архитектура, новые команды, ссылка на EXTRA_CARE.
 5. Написать TG-watchdog скрипты (`xray-tg-watchdog.sh`, `xray-tg-daily-summary.sh`) и интегрировать в `install.sh`.
 6. Перед коммитом — `grep -ri '<реальный домен>\|<реальный UUID>\|<публичный ключ Reality>\|185\.241\.55\.130' public/` — должен быть пуст.
+
+---
+
+## Инцидент 2026-05-19: Reality deprecated, попытка XHTTP-миграции провалилась (silent failure)
+
+### Что случилось
+
+1. **Reality :443 деградировал** — с роутера 1/5 probes в таймаут, latency 0.34-2.44s.
+   Сравнение с телефонными параметрами (другой inbound id=??? :45865 SNI=`www.nvidia.com`)
+   показало что **на сервере висят два разных Reality-inbound'а**, один из них (:443)
+   судя по всему таргетируется DPI на маршруте `домашний ISP → :443`. Reality удалён
+   из клиентского конфига полностью.
+
+2. **Попытка добавить XHTTP** (путь A из MIGRATION-XHTTP.md): outbound на :2087, серверный
+   inbound id=6 живой и слушает. Изолированный тест через `xray-test-xhttp-isolated.sh`
+   (SOCKS5:10888 → xhttp → httpbin.org) — **успех**, `{"origin": "<<VLESS_SERVER>>"}`.
+
+3. **В проде XHTTP молча зависает.** При `xray api bo -b vpn-balancer proxy-xhttp` → 8/8
+   curl-проб через 127.0.0.1:8118 в таймаут. **В error.log ноль ошибок про xhttp.**
+   xray просто не отдаёт ответ.
+
+4. **Хуже — silent failure через observatory.** Observatory probe (внутренний путь, без
+   tproxy) **проходит успешно**, поэтому xhttp считается «alive», и leastPing
+   периодически выбирает его → пользовательский трафик через `tproxy → xray → xhttp`
+   уходит в чёрную дыру до следующего цикла observatory.
+   В Telegram пришло уведомление `❓ balancer выбрал: proxy-xhttp` в момент когда
+   пользовательский интернет встал.
+
+5. Дополнительно: `observatory.enableConcurrency=false` → пинги xhttp (висящие до
+   таймаута) **блокируют пинги grpc**, что объясняет регулярные `proxy-grpc is dead`
+   события в логе за предыдущие дни.
+
+### Почему изоляция работала, а прод нет
+
+Принципиальная разница между путями:
+
+| Путь | inbound | outbound | sockopt mark |
+|---|---|---|---|
+| Изолированный тест | SOCKS5 на 127.0.0.1:10888 (loopback) | proxy-xhttp | нет mark |
+| Прод observatory | внутренний probe (минует tproxy) | proxy-xhttp | mark=255 |
+| Прод пользователь | tproxy на :12345 (mark=1) | proxy-xhttp | mark=255 |
+
+Observatory probe работает потому что он **внутренний, не идёт через tproxy**. Пользовательский
+трафик — через tproxy. Где-то в этой связке tproxy+H2(XHTTP)+sockopt-mark пакеты гибнут
+без логирования. **Гипотезы (не проверены):**
+
+1. `sockopt.mark=255` на исходящих XHTTP-пакетах не пробрасывается корректно через
+   H2-фрейминг — последующие пакеты после первого SETTINGS frame не маркируются,
+   попадают обратно в tproxy → loop → timeout.
+2. XHTTP `mode: "auto"` с ALPN h2 пробует H3/QUIC fallback, а UDP:443 у нас заблокирован
+   nft-правилом для всех destination'ов (см. quic_block в `xray-init`).
+3. HTTP/2 keepalive streams живут долго, sockopt применяется только при создании
+   сокета — после первого пакета mark «теряется».
+4. tproxy чейн перехватывает обратно пакеты xray к серверу :2087 несмотря на mark=255,
+   потому что nft-правило matches mark != 0xff неправильно для определённых l4-флагов
+   (например SYN-ACK retransmit).
+
+### Что было сделано
+
+- Reality удалён из конфига полностью (deprecated).
+- XHTTP пытались поднять — **откатили**, оставлен только gRPC.
+- Стейт привёден к консистентности: активный конфиг = `/root/xray-config.safe.json` = grpc-only,
+  random стратегия (с одним outbound стратегия не важна), все cron rollback-задачи сняты,
+  /root/xray-rollback-*.sh удалены.
+- Селектор `["proxy-grpc"]` (не `["proxy-"]`, чтобы observatory не пинговал больше ничего
+  и не было `enableConcurrency=false` блокировок).
+
+### Текущее состояние (по итогу инцидента)
+
+- gRPC :2053 **единственный** аплинк. Probes 0.18-0.26s, стабильно.
+- **Резерва на роутере нет.** Если gRPC сдохнет — VPN ляжет, трафик уйдёт в direct
+  (геосайт-правила работают, но всё «остальное» где proxy = balancerTag — дропается).
+- На ноуте есть локальные fallback'и: AmneziaWG-клиент, прямые VLESS — пользователь
+  может перейти на них руками если роутер встанет.
+- Наблюдательная сеть активна: selfheal v2 (end-to-end curl каждые 2 мин), memguard
+  (RAM-порог), TG-уведомления о селекциях balancer'а.
+
+### Грабли для следующего раза
+
+1. **НЕ доверять observatory как единственному health-check'у для outbound.** Observatory
+   probe проходит ВНЕ tproxy → может говорить «alive» при том что пользовательский
+   трафик мёртв. Нужно проверять **end-to-end через 127.0.0.1:8118** (как делает
+   selfheal). Если хочется автоматики — отдельный watchdog должен проверять
+   пользовательский путь и **выкидывать outbound** из балансера, а не observatory.
+
+2. **НЕ оставлять `enableConcurrency=false` если outbound'ов больше одного.** При
+   зависающем probe одного outbound блокируется проверка остальных → каскад dead-событий.
+
+3. **НЕ оставлять auto-rollback и safe.json в рассинхроне.** Если задеплоил конфиг A
+   с rollback'ом и потом задеплоил конфиг B (тоже с rollback'ом) — auto-rollback B
+   восстановит A, а не original. Промоут в `/root/xray-config.safe.json` **отменяет
+   намерение** автоматически, но НЕ отменяет cron-таймер rollback'а. Всегда вместе:
+   - `touch /tmp/xray-rollback-cancel` (отмена планируемого rollback)
+   - `cp config.json /root/xray-config.safe.json` (новый safe baseline)
+   - `crontab -l | grep -v xray-rollback | crontab -` (если хочется параноить дополнительно)
+
+4. **Изолированный тест ≠ прод-тест для XHTTP.** SOCKS5 inbound не повторяет tproxy
+   путь. Для следующей попытки XHTTP нужен **tproxy isolated test**: запустить второй
+   xray-процесс с tproxy inbound на отдельном порту :12346 и mark=2, отдельную ip
+   rule fwmark 2 lookup 101, отдельную таблицу маршрутизации, отдельную nft chain.
+   Сложно но без этого тест бесполезен.
+
+### План следующей попытки XHTTP (когда вернёмся)
+
+См. также «Long-term: миграция на XHTTP» выше и `MIGRATION-XHTTP.md`. Дополнения по
+итогам инцидента:
+
+1. **Сначала включить loglevel=debug на 30-60 сек** во время override на xhttp,
+   поймать конкретную причину в логе. Без этого диагностики бесполезны.
+2. **Параллельно tcpdump на WAN-интерфейсе** `tcpdump -i pppoe-wan -nn 'host <<VLESS_SERVER>> and port 2087'` —
+   увидеть уходят ли вообще пакеты с роутера, получаем ли SYN-ACK от сервера, доходит ли
+   до Application Data.
+3. Перед попыткой использовать xhttp в balancer'е — **поднять его как cold-standby**
+   с тегом БЕЗ префикса `proxy-` (например `xhttp-probe`), чтобы observatory его НЕ
+   подхватил. Дать ему отдельное routing-правило на тестовый домен (`httpbin.org`).
+   Проверить с роутера и LAN-клиента. Только после успеха — переименовать в `proxy-xhttp`.
+4. Если debug-лог укажет на sockopt mark проблему — попробовать без `sockopt.mark`
+   (с явным маршрутом через iproute2 правило для этого outbound отдельно).
+5. Не выбрасывать gRPC ни при каких обстоятельствах до подтверждённой работы XHTTP
+   через **полный** пользовательский путь от LAN-клиента.
